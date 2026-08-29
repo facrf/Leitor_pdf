@@ -2,8 +2,6 @@
 
 Este documento estabelece as regras de escopo, segurança, boas práticas e limites operacionais para qualquer agente autônomo ou assistente de IA trabalhando neste repositório.
 
----
-
 ## 1. Escopo de Acesso e Limitação de Diretório (CRÍTICO)
 
 > **Regra Primária de Isolamento:** O acesso e a atuação do agente estão **estritamente restritos** a esta pasta raiz (`/home/facrf/projetos/Leitor_pdf`) e suas subpastas.
