@@ -1,0 +1,175 @@
+# ==============================================================================
+# .gitignore amplo para o projeto Leitor_pdf
+# ==============================================================================
+
+# ---------------------------------------------------------
+# Ambientes e Variáveis de Configuração / Segredos
+# ---------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.template
+*.env
+*.pem
+*.key
+*.cert
+*.crt
+secrets.json
+config.local.*
+
+# ---------------------------------------------------------
+# Python
+# ---------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Ambientes virtuais Python
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.conda/
+
+# Testes e Cobertura Python
+.pytest_cache/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+htmlcov/
+.tox/
+.nox/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+cython_debug/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# ---------------------------------------------------------
+# Node.js / TypeScript / Web (se aplicável)
+# ---------------------------------------------------------
+node_modules/
+jspm_packages/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+.yarn-integrity
+.next/
+out/
+.nuxt/
+.vuepress/dist
+.serverless/
+.fusebox/
+.dynamodb/
+.grunt
+package-lock.json.bak
+yarn.lock.bak
+
+# ---------------------------------------------------------
+# IDEs, Editores de Texto e Ferramentas
+# ---------------------------------------------------------
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+.history/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*.swn
+*~
+*.bak
+*.orig
+
+# ---------------------------------------------------------
+# Sistema Operacional (OS)
+# ---------------------------------------------------------
+# Linux
+.directory
+.Trash-*
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msm
+*.msp
+*.lnk
+
+# ---------------------------------------------------------
+# Logs, Arquivos Temporários e Caches
+# ---------------------------------------------------------
+*.log
+logs/
+*.log.*
+temp/
+tmp/
+*.tmp
+*.temp
+.cache/
+
+# ---------------------------------------------------------
+# Dados, Saídas e Arquivos de Processamento (PDFs / OCR / etc.)
+# ---------------------------------------------------------
+# Pastas comuns de processamento local
+data/
+datasets/
+input/
+output/
+processed/
+extracted/
+storage/
+temp_pdf/
+
+# Descomente a linha abaixo caso não queira versionar nenhum PDF no repositório:
+# *.pdf
