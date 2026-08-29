@@ -50,6 +50,7 @@ Este documento estabelece as regras de escopo, segurança, boas práticas e limi
 
 ## 5. Protocolo de Modificação e Testes
 
+
 - Antes de aplicar alterações complexas, analise os impactos nos módulos existentes.
 - Sempre verifique a sintaxe e rode os testes relevantes antes de finalizar uma tarefa.
 - Mantenha a documentação (como `README.md` e este `AGENTS.md`) sempre sincronizada com as mudanças arquiteturais.
