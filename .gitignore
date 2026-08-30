@@ -98,6 +98,11 @@ package-lock.json.bak
 yarn.lock.bak
 
 # ---------------------------------------------------------
+# Rust
+# ---------------------------------------------------------
+target/
+
+# ---------------------------------------------------------
 # IDEs, Editores de Texto e Ferramentas
 # ---------------------------------------------------------
 .vscode/*
@@ -170,6 +175,9 @@ processed/
 extracted/
 storage/
 temp_pdf/
+*.db
+*.db-shm
+*.db-wal
 
 # Descomente a linha abaixo caso não queira versionar nenhum PDF no repositório:
 # *.pdf

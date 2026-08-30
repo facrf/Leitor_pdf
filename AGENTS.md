@@ -16,11 +16,13 @@ Este documento estabelece as regras de escopo, segurança, boas práticas e limi
 ## 2. Visão Geral do Projeto
 
 - **Nome do Projeto:** `Leitor_pdf`
-- **Finalidade:** Leitura, processamento, extração e análise de documentos PDF.
+- **Finalidade:** Biblioteca digital local para catalogação, leitura e organização de PDF, EPUB, MOBI/AZW, CBZ e formatos de texto.
 - **Estrutura Esperada:**
-  - Código fonte modular e desacoplado.
-  - Tratamento robusto de arquivos PDF (incluindo tratamento de páginas corrompidas, PDFs escaneados/OCR, textos não estruturados e metadados).
-  - Separação clara entre camada de ingestão/leitura, processamento de texto e persistência/saída.
+  - Backend Rust modular em `src/`, persistência SQLite e interface estática em `web/`.
+  - Separação clara entre catálogo/ingestão, leitores por formato, metadados, API e persistência.
+  - Execução principal via Docker na porta 20000, com `/pdf` e `/data` configuráveis por variáveis de ambiente.
+  - Tratamento robusto de arquivos inválidos, compactados malformados, páginas corrompidas e textos não estruturados.
+  - Funcionamento offline-first; qualquer consulta externa de metadados exige habilitação e ação explícitas do usuário.
 
 ---
 

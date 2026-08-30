@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#171a17">
+  <meta name="description" content="Biblioteca digital privada e offline-first">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <title>Estante Livre</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Estante Livre">
+      <span class="brand-mark" aria-hidden="true">EL</span>
+      <span><strong>Estante</strong><small>Livre</small></span>
+    </a>
+    <label class="search">
+      <span aria-hidden="true">⌕</span>
+      <input id="search" type="search" placeholder="Título, autor ou arquivo…" autocomplete="off">
+      <kbd>/</kbd>
+    </label>
+    <nav class="top-actions" aria-label="Ações principais">
+      <button class="button ghost" id="scan-button" type="button"><span aria-hidden="true">↻</span><span class="desktop-label">Atualizar</span></button>
+      <button class="button primary" id="upload-button" type="button"><span aria-hidden="true">＋</span><span>Adicionar</span></button>
+      <button class="icon-button" id="settings-button" type="button" aria-label="Configurações">⚙</button>
+    </nav>
+    <input id="upload-input" type="file" hidden accept=".pdf,.epub,.mobi,.azw,.azw3,.cbz,.txt,.md,.html,.htm,.fb2">
+  </header>
+
+  <main class="shell">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">SUA BIBLIOTECA PARTICULAR</p>
+        <h1>Leia no seu ritmo.<br><em>Seus livros ficam seus.</em></h1>
+        <p>Organize, leia e anote sem entregar sua biblioteca a ninguém.</p>
+      </div>
+      <div class="privacy-card">
+        <span class="privacy-icon" aria-hidden="true">⌂</span>
+        <div><strong>Modo local</strong><small id="network-status">Nenhuma consulta externa automática</small></div>
+      </div>
+    </section>
+
+    <section class="library-heading">
+      <div>
+        <h2>Minha estante</h2>
+        <p id="library-summary">Carregando o catálogo…</p>
+      </div>
+      <div class="view-switch" role="group" aria-label="Visualização">
+        <button type="button" class="active" data-view="grid" aria-label="Grade">▦</button>
+        <button type="button" data-view="list" aria-label="Lista">☷</button>
+      </div>
+    </section>
+
+    <section id="book-grid" class="book-grid" aria-live="polite"></section>
+
+    <section id="empty-state" class="empty-state hidden">
+      <span aria-hidden="true">▤</span>
+      <h2>Sua estante está esperando</h2>
+      <p>Adicione um livro ou faça uma varredura da pasta configurada.</p>
+      <div><button class="button primary" id="empty-upload">Adicionar livro</button><button class="button ghost" id="empty-scan">Varrer pasta</button></div>
+    </section>
+  </main>
+
+  <dialog id="book-dialog" class="modal book-modal">
+    <button class="close-button" data-close="book-dialog" aria-label="Fechar">×</button>
+    <div id="book-detail"></div>
+  </dialog>
+
+  <dialog id="settings-dialog" class="modal settings-modal">
+    <button class="close-button" data-close="settings-dialog" aria-label="Fechar">×</button>
+    <header><p class="eyebrow">CONTROLE LOCAL</p><h2>Configurações</h2><p>A rede permanece desligada até você decidir usá-la.</p></header>
+    <form id="settings-form">
+      <label class="field"><span>Pasta da biblioteca</span><input name="library_root" required placeholder="/pdf"><small>No Docker, essa pasta precisa estar montada no container.</small></label>
+      <label class="switch-row">
+        <span><strong>Permitir busca externa de metadados</strong><small>Envia apenas a busca digitada à fonte escolhida. Nunca envia o arquivo.</small></span>
+        <input name="network_metadata_enabled" type="checkbox" role="switch">
+      </label>
+      <div class="form-actions"><button class="button primary" type="submit">Salvar configurações</button></div>
+    </form>
+    <div class="provider-section">
+      <div class="section-title"><div><h3>Fontes de metadados</h3><p>Open Library e Google Books já vêm configurados.</p></div><button class="button ghost small" id="show-provider-form" type="button">Adicionar fonte</button></div>
+      <div id="provider-list" class="provider-list"></div>
+      <form id="provider-form" class="provider-form hidden">
+        <label class="field"><span>Nome</span><input name="name" required placeholder="Minha fonte"></label>
+        <label class="field"><span>Formato da API</span><select name="kind"><option value="open_library">Compatível com Open Library</option><option value="google_books">Compatível com Google Books</option></select></label>
+        <label class="field wide"><span>URL base</span><input name="base_url" type="url" required placeholder="https://exemplo.org"></label>
+        <button class="button primary small" type="submit">Adicionar</button>
+      </form>
+    </div>
+  </dialog>
+
+  <section id="reader" class="reader hidden" aria-label="Leitor">
+    <header class="reader-bar">
+      <button class="icon-button light" id="reader-close" aria-label="Voltar à estante">←</button>
+      <div class="reader-book"><strong id="reader-title"></strong><small id="reader-location"></small></div>
+      <div id="reader-navigation" class="reader-navigation"></div>
+      <button class="button light" id="notes-toggle" type="button">✎ <span class="desktop-label">Anotações</span></button>
+      <a class="icon-button light" id="reader-download" aria-label="Baixar livro">⇩</a>
+    </header>
+    <div class="reader-stage" id="reader-stage"></div>
+    <aside class="notes-panel" id="notes-panel">
+      <header><div><p class="eyebrow">CADERNO</p><h2>Anotações</h2></div><button class="icon-button" id="notes-close" aria-label="Fechar anotações">×</button></header>
+      <form id="note-form"><textarea name="content" required maxlength="10000" placeholder="Escreva uma ideia, citação ou lembrete…"></textarea><button class="button primary" type="submit">Salvar nesta posição</button></form>
+      <div id="notes-list" class="notes-list"></div>
+    </aside>
+  </section>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

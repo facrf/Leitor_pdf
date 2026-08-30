@@ -1,0 +1,19 @@
+services:
+  estante-livre:
+    build: .
+    container_name: estante-livre
+    restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      - "20000:20000"
+    environment:
+      APP_BIND: 0.0.0.0:20000
+      LIBRARY_ROOT: /pdf
+      DATABASE_PATH: /data/library.db
+      COVERS_DIR: /data/covers
+      GOOGLE_BOOKS_API_KEY: ${GOOGLE_BOOKS_API_KEY:-}
+      RUST_LOG: ${RUST_LOG:-estante_livre=info,tower_http=info}
+    volumes:
+      - ./pdf:/pdf
+      - ./data:/data
+

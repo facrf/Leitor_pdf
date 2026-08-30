@@ -1,0 +1,9 @@
+target
+data
+.git
+.env
+*.pdf
+*.epub
+*.mobi
+*.azw*
+
