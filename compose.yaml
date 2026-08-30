@@ -1,6 +1,7 @@
 services:
   estante-livre:
-    build: .
+    # Imagem oficial publicada exclusivamente pelo GitHub Actions no GHCR.
+    image: ${ESTANTE_IMAGE:-ghcr.io/facrf/estante-livre:latest}
     container_name: estante-livre
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"
@@ -16,4 +17,3 @@ services:
     volumes:
       - ./pdf:/pdf
       - ./data:/data
-
