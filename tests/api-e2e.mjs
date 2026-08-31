@@ -33,9 +33,27 @@ const crossOrigin = await fetch(`${baseUrl}/scan`, {
 });
 assert.equal(crossOrigin.status, 403);
 
-const unsupportedUpload = new FormData();
-unsupportedUpload.append('file', new Blob(['executavel de teste']), 'nao-e-livro.exe');
-const unsupportedResponse = await fetch(`${baseUrl}/upload`, { method: 'POST', body: unsupportedUpload });
+// Keep this multipart request fully buffered. When FormData streams the body,
+// Node 22 may surface EPIPE if the server rejects the filename before the upload
+// has finished, hiding the HTTP 400 response that this test needs to verify.
+const unsupportedBoundary = '----EstanteLivreUnsupportedUpload';
+const unsupportedBody = Buffer.from([
+  `--${unsupportedBoundary}`,
+  'Content-Disposition: form-data; name="file"; filename="nao-e-livro.exe"',
+  'Content-Type: application/octet-stream',
+  '',
+  'executavel de teste',
+  `--${unsupportedBoundary}--`,
+  '',
+].join('\r\n'));
+const unsupportedResponse = await fetch(`${baseUrl}/upload`, {
+  method: 'POST',
+  headers: {
+    'Content-Type': `multipart/form-data; boundary=${unsupportedBoundary}`,
+    'Content-Length': String(unsupportedBody.byteLength),
+  },
+  body: unsupportedBody,
+});
 assert.equal(unsupportedResponse.status, 400);
 
 await request('/scan', { method: 'POST' });
