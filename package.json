@@ -1,0 +1,16 @@
+{
+  "name": "estante-livre-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Testes de contrato e navegador da interface Estante Livre",
+  "scripts": {
+    "test:ui": "node --check web/app.js && node tests/ui-smoke.mjs",
+    "test:api": "node tests/run-server-test.mjs tests/api-e2e.mjs",
+    "test:auth": "node tests/run-server-test.mjs tests/auth-e2e.mjs",
+    "test:browser": "playwright test",
+    "test:browser:report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}

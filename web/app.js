@@ -1,6 +1,10 @@
 const state = {
-  books: [], settings: null, providers: [], currentBook: null,
-  reader: { kind: null, location: {}, percent: 0, items: [] }, searchTimer: null,
+  books: [], facets: { formats: [], authors: [], subjects: [] }, desk: [], suggestions: [],
+  settings: null, providers: [], collections: [], bookCollectionIds: [], currentBook: null,
+  filters: { q: '', format: '', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '' },
+  reader: { kind: null, location: {}, percent: 0, items: [] },
+  searchTimer: null, scanTimer: null, scanObservedRunning: false,
+  carouselIndex: 0, carouselTimer: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -46,10 +50,15 @@ function coverMarkup(book, detail = false) {
   return `<div class="book-cover ${book.is_available === false ? 'unavailable' : ''}">${image}${detail ? '' : `<b class="format-badge">${escapeHtml(book.format)}</b>`}</div>`;
 }
 
-async function loadBooks(query = '') {
+async function loadBooks(query = state.filters.q) {
+  state.filters.q = query || '';
   try {
-    const data = await api(`/books?q=${encodeURIComponent(query)}`);
+    const params = new URLSearchParams();
+    Object.entries(state.filters).forEach(([key, value]) => { if (value) params.set(key === 'q' ? 'q' : key, value); });
+    const data = await api(`/books?${params}`);
     state.books = data.books;
+    state.facets = data.facets;
+    renderFilters();
     renderBooks();
   } catch (error) { toast(error.message, true); }
 }
@@ -59,20 +68,113 @@ function renderBooks() {
   $('#library-summary').textContent = `${state.books.length} ${state.books.length === 1 ? 'livro encontrado' : 'livros encontrados'}`;
   $('#empty-state').classList.toggle('hidden', state.books.length !== 0);
   grid.classList.toggle('hidden', state.books.length === 0);
+  const filtered = Object.values(state.filters).some(Boolean);
+  $('#empty-message').textContent = filtered ? 'Nenhum livro corresponde aos filtros escolhidos.' : 'Adicione um livro ou faça uma varredura da pasta configurada.';
   grid.innerHTML = state.books.map(book => `
     <article class="book-card" data-book-id="${book.id}" tabindex="0" aria-label="Abrir ${escapeHtml(book.title)}">
       ${coverMarkup(book)}
       <div class="book-info"><h3>${escapeHtml(book.title)}</h3><p>${escapeHtml(book.author || book.filename)}</p>
+        ${book.subjects?.length ? `<small class="subject-label">${escapeHtml(book.subjects.slice(0, 2).join(' · '))}</small>` : ''}
         <div class="progress-track"><i style="width:${Math.max(0, Math.min(100, book.progress_percent))}%"></i></div>
         <small class="progress-label">${book.progress_percent ? `${Math.round(book.progress_percent)}% lido` : 'Ainda não iniciado'}</small>
       </div>
     </article>`).join('');
 }
 
+function renderFilters() {
+  const configurations = [
+    ['#filter-format', state.facets.formats, 'Todos os formatos', 'format'],
+    ['#filter-author', state.facets.authors, 'Todos os autores', 'author'],
+    ['#filter-subject', state.facets.subjects, 'Todos os assuntos', 'subject'],
+    ['#filter-publisher', state.facets.publishers || [], 'Todas', 'publisher'],
+    ['#filter-language', state.facets.languages || [], 'Todos', 'language'],
+    ['#filter-year', state.facets.years || [], 'Todos', 'year'],
+  ];
+  configurations.forEach(([selector, values, label, key]) => {
+    const select = $(selector);
+    select.innerHTML = `<option value="">${label}</option>${values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('')}`;
+    select.value = state.filters[key];
+  });
+  const collectionSelect = $('#filter-collection');
+  collectionSelect.innerHTML = '<option value="">Todas as coleções</option>' + (state.facets.collections || []).map(collection => `<option value="${collection.id}">${escapeHtml(collection.name)} (${collection.book_count})</option>`).join('');
+  collectionSelect.value = state.filters.collection_id;
+  $('#filter-progress').value = state.filters.progress;
+  $('#filter-availability').value = state.filters.availability;
+  $('#filter-min-size').value = state.filters.min_size ? Math.round(Number(state.filters.min_size) / 1024 / 1024) : '';
+  $('#filter-max-size').value = state.filters.max_size ? Math.round(Number(state.filters.max_size) / 1024 / 1024) : '';
+  $('#filter-sort').value = state.filters.sort || 'title';
+  $('#clear-filters').classList.toggle('hidden', !Object.values(state.filters).some(Boolean));
+}
+
+async function loadReadingDesk() {
+  try {
+    const data = await api('/reading-desk');
+    state.desk = data.books;
+    renderReadingDesk();
+  } catch (error) { toast(error.message, true); }
+}
+
+function renderReadingDesk() {
+  const section = $('#reading-desk');
+  section.classList.toggle('hidden', state.desk.length === 0);
+  $('#reading-desk-list').innerHTML = state.desk.map(book => `
+    <article class="desk-book" data-book-id="${book.id}" tabindex="0">
+      ${coverMarkup(book)}
+      <div class="desk-book-copy"><small>${Math.round(book.progress_percent)}% LIDO</small><h3>${escapeHtml(book.title)}</h3><p>${escapeHtml(book.author || book.filename)}</p>
+        <div class="progress-track"><i style="width:${book.progress_percent}%"></i></div>
+      </div>
+      <button class="desk-remove" type="button" data-desk-remove="${book.id}" aria-label="Retirar ${escapeHtml(book.title)} da mesa">×</button>
+    </article>`).join('');
+}
+
+async function removeFromDesk(id) {
+  try {
+    await api(`/books/${id}/progress`, { method: 'DELETE' });
+    toast('Livro retirado da mesa de leitura.');
+    await Promise.all([loadReadingDesk(), loadBooks()]);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function loadSuggestions() {
+  clearInterval(state.carouselTimer);
+  state.carouselTimer = null;
+  if (!state.settings?.carousel_enabled) {
+    $('#suggestions').classList.add('hidden');
+    return;
+  }
+  try {
+    const data = await api('/suggestions');
+    state.suggestions = data.books;
+    state.carouselIndex = 0;
+    $('#suggestions').classList.toggle('hidden', state.suggestions.length === 0);
+    renderSuggestion();
+    if (state.suggestions.length > 1) {
+      state.carouselTimer = setInterval(() => moveSuggestion(1), state.settings.carousel_interval_seconds * 1000);
+    }
+  } catch (error) { toast(error.message, true); }
+}
+
+function renderSuggestion() {
+  const book = state.suggestions[state.carouselIndex];
+  if (!book) return;
+  $('#suggestion-stage').innerHTML = `<article class="suggestion-card" data-book-id="${book.id}">
+    <div class="suggestion-cover">${coverMarkup(book, true)}</div>
+    <div><small class="suggestion-counter">SUGESTÃO ${state.carouselIndex + 1} DE ${state.suggestions.length}</small><h3>${escapeHtml(book.title)}</h3><p class="suggestion-author">${escapeHtml(book.author || 'Autor não informado')}</p><p>${escapeHtml(book.subjects?.slice(0, 3).join(' · ') || `Um título em ${book.format.toUpperCase()} escolhido ao acaso na sua estante.`)}</p><button class="button primary" type="button">Conhecer este livro →</button></div>
+  </article>`;
+}
+
+function moveSuggestion(step) {
+  if (!state.suggestions.length) return;
+  state.carouselIndex = (state.carouselIndex + step + state.suggestions.length) % state.suggestions.length;
+  renderSuggestion();
+}
+
 async function openBook(id) {
   try {
-    const [{ book }, providerData] = await Promise.all([api(`/books/${id}`), api('/metadata/providers')]);
+    const [{ book, collections, book_collection_ids: bookCollectionIds }, providerData] = await Promise.all([api(`/books/${id}`), api('/metadata/providers')]);
     state.currentBook = book;
+    state.collections = collections;
+    state.bookCollectionIds = bookCollectionIds;
     state.providers = providerData.providers;
     $('#book-detail').innerHTML = detailMarkup(book);
     bindBookDetail();
@@ -101,6 +203,7 @@ function detailMarkup(book) {
         <div><span>Editora</span>${escapeHtml(book.publisher || '—')}</div><div><span>Publicação</span>${escapeHtml(book.published_date || '—')}</div>
         <div><span>ISBN</span>${escapeHtml(book.isbn || '—')}</div><div><span>Idioma</span>${escapeHtml(book.language || '—')}</div>
       </div>
+      <section class="detail-section"><h3>Coleções</h3><div class="collection-checks">${state.collections.length ? state.collections.map(collection => `<label><input type="checkbox" data-book-collection="${collection.id}" ${state.bookCollectionIds.includes(collection.id) ? 'checked' : ''}><i style="--collection-color:${escapeHtml(collection.color)}"></i>${escapeHtml(collection.name)}</label>`).join('') : '<span class="detail-description">Crie uma coleção nas configurações.</span>'}</div></section>
       <section class="detail-section" id="edit-section" hidden>${editFormMarkup(book)}</section>
       <section class="detail-section">
         <h3>Completar metadados</h3>
@@ -125,6 +228,16 @@ function bindBookDetail() {
   $('#edit-form')?.addEventListener('submit', saveManualMetadata);
   $('#metadata-form')?.addEventListener('submit', searchMetadata);
   $('#share-book')?.addEventListener('click', createShare);
+  $$('[data-book-collection]').forEach(input => input.onchange = () => toggleBookCollection(Number(input.dataset.bookCollection), input.checked));
+}
+
+async function toggleBookCollection(collectionId, enabled) {
+  try {
+    await api(`/collections/${collectionId}/books/${state.currentBook.id}`, { method: enabled ? 'PUT' : 'DELETE' });
+    state.bookCollectionIds = enabled ? [...new Set([...state.bookCollectionIds, collectionId])] : state.bookCollectionIds.filter(id => id !== collectionId);
+    toast(enabled ? 'Livro adicionado à coleção.' : 'Livro retirado da coleção.');
+    loadBooks();
+  } catch (error) { toast(error.message, true); }
 }
 
 async function saveManualMetadata(event) {
@@ -188,10 +301,13 @@ async function loadShares() {
 async function openReader(book) {
   state.currentBook = book;
   state.reader = { kind: book.format, location: book.progress?.location || {}, percent: book.progress?.percent || 0, items: [] };
+  if (!state.reader.percent) state.reader.percent = book.page_count ? Math.min(99, 100 / book.page_count) : 0.1;
   $('#reader-title').textContent = book.title;
   $('#reader-download').href = `/api/books/${book.id}/file?download=true`;
   $('#reader').classList.remove('hidden'); document.body.style.overflow = 'hidden';
-  await renderReader(); loadNotes();
+  await renderReader();
+  persistProgress();
+  loadNotes();
 }
 
 async function renderReader() {
@@ -278,17 +394,177 @@ function locationLabel(location = {}) {
 }
 
 function closeReader() {
-  persistProgress(); $('#reader').classList.add('hidden'); $('#notes-panel').classList.remove('open'); document.body.style.overflow = ''; loadBooks($('#search').value);
+  persistProgress(); $('#reader').classList.add('hidden'); $('#notes-panel').classList.remove('open'); document.body.style.overflow = '';
+  Promise.all([loadBooks($('#search').value), loadReadingDesk()]);
 }
 
 async function loadSettings() {
   try {
     state.settings = await api('/settings');
-    const form = $('#settings-form'); form.elements.library_root.value = state.settings.library_root;
+    const form = $('#settings-form');
+    form.elements.library_root.value = state.settings.library_root;
     form.elements.network_metadata_enabled.checked = state.settings.network_metadata_enabled;
+    form.elements.scan_profile.value = state.settings.scan_profile;
+    form.elements.carousel_enabled.checked = state.settings.carousel_enabled;
+    form.elements.carousel_interval_seconds.value = state.settings.carousel_interval_seconds;
+    form.elements.auto_cover_enabled.checked = state.settings.auto_cover_enabled;
     $('#network-status').textContent = state.settings.network_metadata_enabled ? 'Consultas externas somente sob seu comando' : 'Nenhuma consulta externa permitida';
-    const data = await api('/metadata/providers'); state.providers = data.providers; renderProviders();
+    applyBranding();
+    const [data, collectionData] = await Promise.all([api('/metadata/providers'), api('/collections')]);
+    state.providers = data.providers; state.collections = collectionData.collections;
+    renderProviders(); renderCollections();
+    $('#auth-status-detail').textContent = state.settings.auth_enabled ? 'Ativa por AUTH_USERNAME e AUTH_PASSWORD. Use HTTPS fora da máquina local.' : 'Desativada. Defina AUTH_USERNAME e AUTH_PASSWORD no ambiente para proteger a API.';
+    $('#auth-status-title').textContent = state.settings.auth_enabled ? 'API protegida' : 'API sem autenticação';
+    await loadSuggestions();
   } catch (error) { toast(error.message, true); }
+}
+
+function renderCollections() {
+  $('#collection-list').innerHTML = state.collections.map(collection => `<form class="collection-admin-row" data-collection-id="${collection.id}"><i style="--collection-color:${escapeHtml(collection.color)}"></i><input name="name" value="${escapeHtml(collection.name)}" maxlength="80" required><input name="color" type="color" value="${escapeHtml(collection.color)}" aria-label="Cor"><small>${collection.book_count} livros</small><button class="button ghost small" type="submit">Salvar</button><button class="button danger small" type="button" data-collection-delete>Excluir</button></form>`).join('');
+  $$('.collection-admin-row').forEach(row => {
+    row.onsubmit = event => saveCollection(event, row);
+    $('[data-collection-delete]', row).onclick = () => deleteCollection(row);
+  });
+}
+
+async function saveCollection(event, row) {
+  event.preventDefault();
+  const payload = Object.fromEntries(new FormData(row));
+  try { await api(`/collections/${row.dataset.collectionId}`, { method: 'PUT', body: JSON.stringify(payload) }); await loadSettings(); await loadBooks(); toast('Coleção atualizada.'); }
+  catch (error) { toast(error.message, true); }
+}
+
+async function deleteCollection(row) {
+  const name = row.elements.name.value;
+  if (!confirm(`Excluir a coleção “${name}”? Os livros não serão apagados.`)) return;
+  try { await api(`/collections/${row.dataset.collectionId}`, { method: 'DELETE' }); await loadSettings(); await loadBooks(); toast('Coleção excluída.'); }
+  catch (error) { toast(error.message, true); }
+}
+
+async function loadMaintenance() {
+  try {
+    const [{ health }, { groups }, { backups }] = await Promise.all([
+      api('/maintenance/health'), api('/maintenance/duplicates'), api('/maintenance/backups'),
+    ]);
+    renderHealth(health);
+    renderDuplicates(groups);
+    renderBackups(backups);
+  } catch (error) { toast(`Manutenção: ${error.message}`, true); }
+}
+
+function renderHealth(health) {
+  const cards = [
+    ['Livros no catálogo', health.total, 'total'],
+    ['Disponíveis', health.available, 'good'],
+    ['Arquivos ausentes', health.unavailable, health.unavailable ? 'warn' : 'good'],
+    ['Sem autor', health.without_author, health.without_author ? 'warn' : 'good'],
+    ['Sem assunto', health.without_subject, health.without_subject ? 'warn' : 'good'],
+    ['Sem capa', health.without_cover, health.without_cover ? 'warn' : 'good'],
+    ['Sem idioma', health.without_language, health.without_language ? 'warn' : 'good'],
+    ['Grupos duplicados', health.duplicate_groups, health.duplicate_groups ? 'warn' : 'good'],
+  ];
+  const issues = health.scan_issues || [];
+  $('#health-grid').innerHTML = cards.map(([label, value, tone]) => `<article class="health-card ${tone}"><strong>${value}</strong><span>${label}</span></article>`).join('')
+    + (issues.length ? `<details class="scan-issues"><summary>${issues.length} aviso(s) da última varredura</summary>${issues.map(issue => `<p><strong>${escapeHtml(issue.path)}</strong><small>${escapeHtml(issue.message)}</small></p>`).join('')}</details>` : '');
+}
+
+function renderDuplicates(groups) {
+  $('#duplicate-count').textContent = groups.length;
+  $('#duplicate-list').innerHTML = groups.length ? groups.map((group, index) => `<article class="duplicate-group">
+    <header><strong>Grupo ${index + 1}</strong><span>${group.books.length} arquivos · ${formatBytes(group.size)}</span></header>
+    <small class="fingerprint" title="${escapeHtml(group.fingerprint)}">Assinatura ${escapeHtml(group.fingerprint.slice(0, 16))}…</small>
+    ${group.books.map((book, bookIndex) => `<div class="duplicate-book"><div><strong>${escapeHtml(book.title)}</strong><small>${escapeHtml(book.relative_path)}</small></div>${bookIndex === 0 ? '<span class="keep-label">MANTER</span>' : `<button class="button danger small" type="button" data-delete-book="${book.id}" data-filename="${escapeHtml(book.filename)}">Excluir arquivo</button>`}</div>`).join('')}
+  </article>`).join('') : '<p class="detail-description">Nenhuma provável duplicata encontrada. A comparação usa tamanho e assinatura parcial do conteúdo.</p>';
+  $$('[data-delete-book]', $('#duplicate-list')).forEach(button => button.onclick = () => deleteDuplicateFile(button));
+}
+
+async function deleteDuplicateFile(button) {
+  const filename = button.dataset.filename;
+  const confirmation = prompt(`Esta operação apaga o arquivo original e não pode ser desfeita pelo aplicativo.\n\nPara confirmar, digite exatamente:\n${filename}`);
+  if (confirmation !== filename) {
+    if (confirmation !== null) toast('Nome diferente: exclusão cancelada.', true);
+    return;
+  }
+  try {
+    await api(`/books/${button.dataset.deleteBook}/file`, { method: 'DELETE', body: JSON.stringify({ filename }) });
+    toast(`Arquivo ${filename} excluído. Não é recuperável pelo aplicativo.`);
+    await Promise.all([loadMaintenance(), loadBooks()]);
+  } catch (error) { toast(error.message, true); }
+}
+
+function renderBackups(backups) {
+  $('#backup-list').innerHTML = backups.length ? backups.map(backup => `<article class="backup-row"><div><strong>${escapeHtml(backup.filename)}</strong><small>${formatBytes(backup.size)} · ${new Date(backup.modified_at).toLocaleString()}</small></div><a class="button ghost small" href="/api/maintenance/backups/${encodeURIComponent(backup.filename)}">Baixar</a><button class="button danger small" type="button" data-backup-delete="${escapeHtml(backup.filename)}">Excluir</button></article>`).join('') : '<p class="detail-description">Nenhum backup criado ainda.</p>';
+  $$('[data-backup-delete]', $('#backup-list')).forEach(button => button.onclick = () => deleteBackup(button.dataset.backupDelete));
+}
+
+async function createBackup() {
+  const button = $('#create-backup');
+  button.disabled = true; button.textContent = 'Criando…';
+  try { await api('/maintenance/backups', { method: 'POST' }); await loadMaintenance(); toast('Backup consistente criado. Os livros originais não foram duplicados.'); }
+  catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; button.textContent = 'Criar backup agora'; }
+}
+
+async function deleteBackup(filename) {
+  if (!confirm(`Excluir o backup “${filename}”?`)) return;
+  try { await api(`/maintenance/backups/${encodeURIComponent(filename)}`, { method: 'DELETE' }); await loadMaintenance(); toast('Backup excluído.'); }
+  catch (error) { toast(error.message, true); }
+}
+
+async function restoreBackup(file) {
+  if (!file) return;
+  const confirmation = prompt('A restauração substituirá catálogo, progresso e configurações. Um backup de segurança será criado antes.\n\nDigite RESTAURAR para continuar:');
+  if (confirmation !== 'RESTAURAR') { $('#restore-input').value = ''; return; }
+  const form = new FormData(); form.append('backup', file);
+  try {
+    const data = await api('/maintenance/restore', { method: 'POST', body: form });
+    toast(`Restauração concluída. Backup de segurança: ${data.safety_backup.filename}`);
+    await Promise.all([loadSettings(), loadBooks(), loadReadingDesk(), loadMaintenance()]);
+  } catch (error) { toast(error.message, true); }
+  $('#restore-input').value = '';
+}
+
+async function generateCovers() {
+  try {
+    const status = await api('/maintenance/covers', { method: 'POST' });
+    state.scanObservedRunning = true; renderScanStatus(status); scheduleScanPoll();
+    $('#settings-dialog').close();
+    toast('Geração sequencial de capas iniciada com prioridade baixa.');
+  } catch (error) { toast(error.message, true); }
+}
+
+async function importOpds(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const url = new FormData(form).get('url');
+  if (!confirm(`Importar e baixar os livros anunciados por este catálogo?\n${url}`)) return;
+  const button = $('button', form); button.disabled = true; button.textContent = 'Importando…';
+  try {
+    const { report } = await api('/opds/import', { method: 'POST', body: JSON.stringify({ url }) });
+    toast(`${report.imported} livro(s) importado(s); ${report.skipped} ignorado(s). Iniciando a catalogação.`);
+    form.reset(); await scanLibrary(); $('#settings-dialog').close();
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; button.textContent = 'Importar livros do OPDS'; }
+}
+
+function applyBranding() {
+  const branding = state.settings?.branding || {};
+  const logo = $('#brand-logo'), fallback = $('#brand-fallback');
+  if (branding.logo) {
+    logo.src = branding.logo; logo.classList.remove('hidden'); fallback.classList.add('hidden');
+    logo.onerror = () => { logo.classList.add('hidden'); fallback.classList.remove('hidden'); };
+  } else { logo.removeAttribute('src'); logo.classList.add('hidden'); fallback.classList.remove('hidden'); }
+  $('#dynamic-favicon').href = branding.favicon || 'data:,';
+  const hero = $('#hero');
+  hero.classList.toggle('has-custom-image', Boolean(branding.hero));
+  hero.style.backgroundImage = branding.hero ? `linear-gradient(90deg, rgba(22,25,21,.92), rgba(22,25,21,.3)), url("${branding.hero}")` : '';
+  $$('.asset-control').forEach(control => {
+    const url = branding[control.dataset.brandingKind];
+    const image = $('img', control), placeholder = $('.asset-preview span', control), remove = $('[data-branding-remove]', control);
+    if (url) { image.src = url; image.hidden = false; placeholder.hidden = true; }
+    else { image.removeAttribute('src'); image.hidden = true; placeholder.hidden = false; }
+    remove.disabled = !url;
+  });
 }
 
 function renderProviders() {
@@ -296,11 +572,85 @@ function renderProviders() {
   $$('[data-provider-delete]').forEach(button => button.onclick = async () => { try { await api(`/metadata/providers/${button.dataset.providerDelete}`, { method: 'DELETE' }); await loadSettings(); } catch (error) { toast(error.message, true); } });
 }
 
-async function scanLibrary(button = $('#scan-button')) {
-  const previous = button.innerHTML; button.disabled = true; button.textContent = 'Varrendo…';
-  try { const report = await api('/scan', { method: 'POST' }); toast(`${report.found} livros encontrados; ${report.added} novos.`); await loadBooks($('#search').value); }
-  catch (error) { toast(error.message, true); }
-  finally { button.disabled = false; button.innerHTML = previous; }
+async function uploadBranding(control, file) {
+  if (!file) return;
+  const kind = control.dataset.brandingKind, form = new FormData();
+  form.append('image', file);
+  try {
+    await api(`/settings/branding/${kind}`, { method: 'POST', body: form });
+    await loadSettings();
+    toast('Identidade visual atualizada.');
+  } catch (error) { toast(error.message, true); }
+  $('input[type=file]', control).value = '';
+}
+
+async function removeBranding(control) {
+  const kind = control.dataset.brandingKind;
+  if (!confirm('Excluir esta imagem personalizada?')) return;
+  try {
+    await api(`/settings/branding/${kind}`, { method: 'DELETE' });
+    await loadSettings();
+    toast('Imagem personalizada excluída.');
+  } catch (error) { toast(error.message, true); }
+}
+
+async function scanLibrary() {
+  try {
+    const status = await api('/scan', { method: 'POST' });
+    state.scanObservedRunning = true;
+    renderScanStatus(status);
+    scheduleScanPoll();
+  } catch (error) { toast(error.message, true); }
+}
+
+function renderScanStatus(status) {
+  const panel = $('#scan-progress'), button = $('#scan-button');
+  const labels = {
+    discovering: 'Localizando arquivos compatíveis…', indexing: 'Indexando sua biblioteca',
+    synchronizing: 'Organizando a estante…', covers: 'Gerando capas locais…', completed: status.profile === 'low_priority' ? 'Capas concluídas' : 'Varredura concluída', failed: 'A tarefa encontrou um problema',
+  };
+  if (status.phase === 'idle') { panel.classList.add('hidden'); button.disabled = false; return; }
+  panel.classList.remove('hidden');
+  const percent = Math.max(0, Math.min(100, Number(status.percent || 0)));
+  $('#scan-progress-title').textContent = labels[status.phase] || 'Varredura em andamento';
+  $('#scan-progress-percent').textContent = `${Math.round(percent)}%`;
+  $('#scan-progress-bar').style.width = `${percent}%`;
+  const profileNames = { economical: 'econômico', balanced: 'equilibrado', complete: 'completo' };
+  $('#scan-progress-detail').textContent = status.phase === 'discovering'
+    ? `Perfil ${profileNames[status.profile] || status.profile} · contando os livros`
+    : status.phase === 'failed'
+      ? (status.error || 'Não foi possível concluir')
+      : status.phase === 'covers'
+        ? `${status.processed} de ${status.total} capas · prioridade baixa${status.current_file ? ` · ${status.current_file}` : ''}`
+        : `${status.processed} de ${status.total} arquivos · ${status.found} livros indexados${status.unchanged ? ` · ${status.unchanged} sem releitura` : ''}${status.current_file ? ` · ${status.current_file}` : ''}`;
+  button.disabled = status.running;
+  button.innerHTML = status.running ? `<span aria-hidden="true">↻</span><span class="desktop-label">${Math.round(percent)}%</span>` : '<span aria-hidden="true">↻</span><span class="desktop-label">Atualizar</span>';
+}
+
+function scheduleScanPoll() {
+  clearTimeout(state.scanTimer);
+  state.scanTimer = setTimeout(pollScanStatus, 700);
+}
+
+async function pollScanStatus() {
+  try {
+    const status = await api('/scan');
+    renderScanStatus(status);
+    if (status.running) {
+      state.scanObservedRunning = true;
+      scheduleScanPoll();
+      return;
+    }
+    if (state.scanObservedRunning) {
+      state.scanObservedRunning = false;
+      if (status.phase === 'completed') {
+        if (status.profile === 'low_priority') toast(`${status.processed} capa(s) processada(s) em prioridade baixa.`);
+        else toast(`${status.found} livros: ${status.added} novos, ${status.updated} atualizados, ${status.unchanged} sem releitura e ${status.skipped} ignorados.`);
+        await Promise.all([loadBooks(), loadReadingDesk(), loadSuggestions(), loadMaintenance()]);
+      } else if (status.phase === 'failed') toast(status.error || 'A varredura falhou.', true);
+      setTimeout(() => { if (!$('#scan-button').disabled) $('#scan-progress').classList.add('hidden'); }, 4500);
+    }
+  } catch (error) { toast(`Não foi possível acompanhar a varredura: ${error.message}`, true); }
 }
 
 async function upload(file) {
@@ -315,19 +665,33 @@ async function upload(file) {
 function encodePath(path) { return path.split('/').map(encodeURIComponent).join('/'); }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  await Promise.all([loadSettings(), loadBooks()]);
+  await Promise.all([loadSettings(), loadBooks(), loadReadingDesk()]);
+  pollScanStatus();
   $('#search').addEventListener('input', event => { clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadBooks(event.target.value), 220); });
   document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) { event.preventDefault(); $('#search').focus(); } if (event.key === 'Escape' && !$('#reader').classList.contains('hidden')) closeReader(); });
   $('#book-grid').addEventListener('click', event => { const card = event.target.closest('[data-book-id]'); if (card) openBook(Number(card.dataset.bookId)); });
   $('#book-grid').addEventListener('keydown', event => { if (['Enter',' '].includes(event.key)) { const card = event.target.closest('[data-book-id]'); if (card) openBook(Number(card.dataset.bookId)); } });
+  $('#reading-desk-list').addEventListener('click', event => { const remove = event.target.closest('[data-desk-remove]'); if (remove) { event.stopPropagation(); removeFromDesk(Number(remove.dataset.deskRemove)); return; } const card = event.target.closest('[data-book-id]'); if (card) openBook(Number(card.dataset.bookId)); });
+  $('#reading-desk-list').addEventListener('keydown', event => { if (['Enter',' '].includes(event.key) && !event.target.closest('button')) { const card = event.target.closest('[data-book-id]'); if (card) openBook(Number(card.dataset.bookId)); } });
+  $('#suggestion-stage').addEventListener('click', event => { const card = event.target.closest('[data-book-id]'); if (card) openBook(Number(card.dataset.bookId)); });
+  $('#suggestion-prev').onclick = () => moveSuggestion(-1); $('#suggestion-next').onclick = () => moveSuggestion(1);
+  [['#filter-format','format'], ['#filter-author','author'], ['#filter-subject','subject'], ['#filter-collection','collection_id'], ['#filter-publisher','publisher'], ['#filter-language','language'], ['#filter-year','year'], ['#filter-progress','progress'], ['#filter-availability','availability']].forEach(([selector, key]) => { $(selector).onchange = event => { state.filters[key] = event.target.value; loadBooks(); }; });
+  $('#filter-sort').onchange = event => { state.filters.sort = event.target.value === 'title' ? '' : event.target.value; loadBooks(); };
+  [['#filter-min-size','min_size'], ['#filter-max-size','max_size']].forEach(([selector, key]) => { $(selector).onchange = event => { state.filters[key] = event.target.value ? String(Math.round(Number(event.target.value) * 1024 * 1024)) : ''; loadBooks(); }; });
+  $('#clear-filters').onclick = () => { state.filters = { q: '', format: '', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '' }; $('#search').value = ''; loadBooks(''); };
   $$('.view-switch button').forEach(button => button.onclick = () => { $$('.view-switch button').forEach(item => item.classList.remove('active')); button.classList.add('active'); $('#book-grid').classList.toggle('list', button.dataset.view === 'list'); });
-  $('#scan-button').onclick = () => scanLibrary(); $('#empty-scan').onclick = event => scanLibrary(event.currentTarget);
+  $('#scan-button').onclick = scanLibrary; $('#empty-scan').onclick = scanLibrary;
   $('#upload-button').onclick = $('#empty-upload').onclick = () => $('#upload-input').click(); $('#upload-input').onchange = event => upload(event.target.files[0]);
-  $('#settings-button').onclick = async () => { await loadSettings(); $('#settings-dialog').showModal(); };
+  $('#settings-button').onclick = async () => { $('#settings-dialog').showModal(); await Promise.all([loadSettings(), loadMaintenance()]); };
   $$('[data-close]').forEach(button => button.onclick = () => document.getElementById(button.dataset.close).close());
-  $('#settings-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; try { await api('/settings', { method: 'PUT', body: JSON.stringify({ library_root: form.elements.library_root.value, network_metadata_enabled: form.elements.network_metadata_enabled.checked }) }); await loadSettings(); toast('Configurações salvas. Faça uma varredura para atualizar a estante.'); } catch (error) { toast(error.message, true); } };
+  $('#settings-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; try { await api('/settings', { method: 'PUT', body: JSON.stringify({ library_root: form.elements.library_root.value, network_metadata_enabled: form.elements.network_metadata_enabled.checked, scan_profile: form.elements.scan_profile.value, auto_cover_enabled: form.elements.auto_cover_enabled.checked, carousel_enabled: form.elements.carousel_enabled.checked, carousel_interval_seconds: Number(form.elements.carousel_interval_seconds.value) }) }); await loadSettings(); toast('Configurações salvas.'); } catch (error) { toast(error.message, true); } };
+  $$('.asset-control').forEach(control => { $('input[type=file]', control).onchange = event => uploadBranding(control, event.target.files[0]); $('[data-branding-remove]', control).onclick = () => removeBranding(control); });
   $('#show-provider-form').onclick = () => $('#provider-form').classList.toggle('hidden');
-  $('#provider-form').onsubmit = async event => { event.preventDefault(); const payload = Object.fromEntries(new FormData(event.currentTarget)); payload.enabled = true; try { await api('/metadata/providers', { method: 'POST', body: JSON.stringify(payload) }); event.currentTarget.reset(); event.currentTarget.classList.add('hidden'); await loadSettings(); toast('Fonte adicionada.'); } catch (error) { toast(error.message, true); } };
+  $('#provider-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const payload = Object.fromEntries(new FormData(form)); payload.enabled = true; try { await api('/metadata/providers', { method: 'POST', body: JSON.stringify(payload) }); form.reset(); form.classList.add('hidden'); await loadSettings(); toast('Fonte adicionada.'); } catch (error) { toast(error.message, true); } };
+  $('#collection-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const payload = Object.fromEntries(new FormData(form)); try { await api('/collections', { method: 'POST', body: JSON.stringify(payload) }); form.reset(); form.elements.color.value = '#6e816a'; await Promise.all([loadSettings(), loadBooks()]); toast('Coleção criada.'); } catch (error) { toast(error.message, true); } };
+  $('#refresh-health').onclick = loadMaintenance; $('#create-backup').onclick = createBackup;
+  $('#restore-input').onchange = event => restoreBackup(event.target.files[0]);
+  $('#generate-covers').onclick = generateCovers; $('#opds-import-form').onsubmit = importOpds;
   $('#reader-close').onclick = closeReader; $('#notes-toggle').onclick = () => $('#notes-panel').classList.toggle('open'); $('#notes-close').onclick = () => $('#notes-panel').classList.remove('open');
-  $('#note-form').onsubmit = async event => { event.preventDefault(); const content = new FormData(event.currentTarget).get('content'); try { await api(`/books/${state.currentBook.id}/notes`, { method: 'POST', body: JSON.stringify({ content, location: state.reader.location }) }); event.currentTarget.reset(); loadNotes(); toast('Anotação salva nesta posição.'); } catch (error) { toast(error.message, true); } };
+  $('#note-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const content = new FormData(form).get('content'); try { await api(`/books/${state.currentBook.id}/notes`, { method: 'POST', body: JSON.stringify({ content, location: state.reader.location }) }); form.reset(); loadNotes(); toast('Anotação salva nesta posição.'); } catch (error) { toast(error.message, true); } };
 });

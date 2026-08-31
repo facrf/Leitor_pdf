@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -15,9 +17,63 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/estante-livre
 
 jobs:
+  test:
+    name: Testes Rust e interface
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obter código
+        uses: actions/checkout@v4
+      - name: Preparar Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache do Cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Verificar formatação Rust
+        run: cargo fmt --check
+      - name: Executar Clippy sem aceitar avisos
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Executar testes Rust
+        run: cargo test --locked
+      - name: Validar volume de 2.287 livros
+        run: cargo test --locked indexes_2287_files -- --ignored
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Instalar dependências dos testes
+        run: npm ci
+      - name: Validar contrato da interface
+        run: npm run test:ui
+      - name: Executar E2E da API e cenários de falha
+        run: npm run test:api
+      - name: Executar E2E de autenticação
+        run: npm run test:auth
+      - name: Instalar Chromium do Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Executar E2E em navegador real
+        run: npm run test:browser
+      - name: Preservar relatório do navegador em caso de falha
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            tests/runtime-data-playwright-results/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Validar Docker Compose
+        run: docker compose config --quiet
+      - name: Construir imagem de produção
+        run: docker build --tag estante-livre:ci .
+
   publish:
     name: GHCR multi-plataforma
     runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name != 'pull_request'
     steps:
       - name: Obter código
         uses: actions/checkout@v4

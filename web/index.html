@@ -7,17 +7,21 @@
   <meta name="description" content="Biblioteca digital privada e offline-first">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
   <title>Estante Livre</title>
+  <link id="dynamic-favicon" rel="icon" href="data:,">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/" aria-label="Estante Livre">
-      <span class="brand-mark" aria-hidden="true">EL</span>
-      <span><strong>Estante</strong><small>Livre</small></span>
+      <img id="brand-logo" class="brand-logo hidden" alt="Logo da biblioteca">
+      <span id="brand-fallback" class="brand-fallback">
+        <span class="brand-mark" aria-hidden="true">EL</span>
+        <span><strong>Estante</strong><small>Livre</small></span>
+      </span>
     </a>
     <label class="search">
       <span aria-hidden="true">⌕</span>
-      <input id="search" type="search" placeholder="Título, autor ou arquivo…" autocomplete="off">
+      <input id="search" type="search" placeholder="Título, autor, assunto ou arquivo…" autocomplete="off">
       <kbd>/</kbd>
     </label>
     <nav class="top-actions" aria-label="Ações principais">
@@ -28,9 +32,18 @@
     <input id="upload-input" type="file" hidden accept=".pdf,.epub,.mobi,.azw,.azw3,.cbz,.txt,.md,.html,.htm,.fb2">
   </header>
 
+  <aside id="scan-progress" class="scan-progress hidden" aria-live="polite">
+    <div class="scan-progress-copy">
+      <span class="scan-pulse" aria-hidden="true"></span>
+      <div><strong id="scan-progress-title">Preparando a varredura…</strong><small id="scan-progress-detail">Localizando livros compatíveis</small></div>
+      <b id="scan-progress-percent">0%</b>
+    </div>
+    <div class="scan-progress-track"><i id="scan-progress-bar"></i></div>
+  </aside>
+
   <main class="shell">
-    <section class="hero">
-      <div>
+    <section id="hero" class="hero">
+      <div class="hero-copy">
         <p class="eyebrow">SUA BIBLIOTECA PARTICULAR</p>
         <h1>Leia no seu ritmo.<br><em>Seus livros ficam seus.</em></h1>
         <p>Organize, leia e anote sem entregar sua biblioteca a ninguém.</p>
@@ -41,8 +54,27 @@
       </div>
     </section>
 
+    <section id="suggestions" class="suggestion-section hidden" aria-label="Sugestões de leitura">
+      <div class="section-heading">
+        <div><p class="eyebrow">DESCOBERTAS DA ESTANTE</p><h2>Que tal ler agora?</h2></div>
+        <div class="carousel-controls">
+          <button class="icon-button" id="suggestion-prev" type="button" aria-label="Sugestão anterior">←</button>
+          <button class="icon-button" id="suggestion-next" type="button" aria-label="Próxima sugestão">→</button>
+        </div>
+      </div>
+      <div id="suggestion-stage" class="suggestion-stage"></div>
+    </section>
+
+    <section id="reading-desk" class="reading-desk hidden">
+      <div class="section-heading">
+        <div><p class="eyebrow">CONTINUE DE ONDE PAROU</p><h2>Minha mesa de leitura</h2><p>Livros iniciados, sempre à mão.</p></div>
+      </div>
+      <div id="reading-desk-list" class="reading-desk-list"></div>
+    </section>
+
     <section class="library-heading">
       <div>
+        <p class="eyebrow">ACERVO LOCAL</p>
         <h2>Minha estante</h2>
         <p id="library-summary">Carregando o catálogo…</p>
       </div>
@@ -52,15 +84,41 @@
       </div>
     </section>
 
+    <section class="catalog-filters" aria-label="Filtros do catálogo">
+      <label><span>Tipo</span><select id="filter-format"><option value="">Todos os formatos</option></select></label>
+      <label><span>Autor</span><select id="filter-author"><option value="">Todos os autores</option></select></label>
+      <label><span>Assunto</span><select id="filter-subject"><option value="">Todos os assuntos</option></select></label>
+      <label><span>Coleção</span><select id="filter-collection"><option value="">Todas as coleções</option></select></label>
+      <button class="button ghost small" id="clear-filters" type="button">Limpar filtros</button>
+    </section>
+    <details class="advanced-filters">
+      <summary>Busca avançada <span>editora, idioma, ano, tamanho e progresso</span></summary>
+      <div>
+        <label><span>Editora</span><select id="filter-publisher"><option value="">Todas</option></select></label>
+        <label><span>Idioma</span><select id="filter-language"><option value="">Todos</option></select></label>
+        <label><span>Ano</span><select id="filter-year"><option value="">Todos</option></select></label>
+        <label><span>Leitura</span><select id="filter-progress"><option value="">Qualquer progresso</option><option value="unread">Não iniciados</option><option value="reading">Em leitura</option><option value="finished">Concluídos</option></select></label>
+        <label><span>Disponibilidade</span><select id="filter-availability"><option value="">Todos</option><option value="available">Disponíveis</option><option value="missing">Ausentes</option></select></label>
+        <label><span>Tamanho mínimo (MB)</span><input id="filter-min-size" type="number" min="0" step="1" placeholder="0"></label>
+        <label><span>Tamanho máximo (MB)</span><input id="filter-max-size" type="number" min="0" step="1" placeholder="Sem limite"></label>
+        <label><span>Ordenar</span><select id="filter-sort"><option value="title">Título</option><option value="author">Autor</option><option value="year">Ano</option><option value="recent">Atualização</option><option value="size">Tamanho</option><option value="progress">Progresso</option></select></label>
+      </div>
+    </details>
+
     <section id="book-grid" class="book-grid" aria-live="polite"></section>
 
     <section id="empty-state" class="empty-state hidden">
       <span aria-hidden="true">▤</span>
       <h2>Sua estante está esperando</h2>
-      <p>Adicione um livro ou faça uma varredura da pasta configurada.</p>
+      <p id="empty-message">Adicione um livro ou faça uma varredura da pasta configurada.</p>
       <div><button class="button primary" id="empty-upload">Adicionar livro</button><button class="button ghost" id="empty-scan">Varrer pasta</button></div>
     </section>
   </main>
+
+  <footer class="site-footer">
+    <span>Acervo privado, feito para durar.</span>
+    <a href="https://www.fabianocesar.com" target="_blank" rel="noreferrer">Desenvolvido por FACRF.</a>
+  </footer>
 
   <dialog id="book-dialog" class="modal book-modal">
     <button class="close-button" data-close="book-dialog" aria-label="Fechar">×</button>
@@ -69,16 +127,89 @@
 
   <dialog id="settings-dialog" class="modal settings-modal">
     <button class="close-button" data-close="settings-dialog" aria-label="Fechar">×</button>
-    <header><p class="eyebrow">CONTROLE LOCAL</p><h2>Configurações</h2><p>A rede permanece desligada até você decidir usá-la.</p></header>
+    <header><p class="eyebrow">CONTROLE LOCAL</p><h2>Configurações</h2><p>Desempenho, identidade e privacidade da sua biblioteca.</p></header>
     <form id="settings-form">
       <label class="field"><span>Pasta da biblioteca</span><input name="library_root" required placeholder="/pdf"><small>No Docker, essa pasta precisa estar montada no container.</small></label>
+      <label class="field"><span>Perfil da varredura</span>
+        <select name="scan_profile">
+          <option value="economical">Econômico — recomendado para grandes acervos</option>
+          <option value="balanced">Equilibrado — lê metadados com pausas</option>
+          <option value="complete">Completo — máxima velocidade</option>
+        </select>
+        <small>O econômico usa o nome do arquivo e evita abrir 150 GB de conteúdo. O equilibrado limita o worker a aproximadamente 65% do tempo de CPU.</small>
+      </label>
       <label class="switch-row">
         <span><strong>Permitir busca externa de metadados</strong><small>Envia apenas a busca digitada à fonte escolhida. Nunca envia o arquivo.</small></span>
         <input name="network_metadata_enabled" type="checkbox" role="switch">
       </label>
+      <label class="switch-row">
+        <span><strong>Gerar capas locais de PDFs</strong><small>Renderiza somente a primeira página, sequencialmente e com prioridade baixa após a varredura.</small></span>
+        <input name="auto_cover_enabled" type="checkbox" role="switch">
+      </label>
+      <label class="switch-row">
+        <span><strong>Ativar sugestões de leitura</strong><small>Exibe livros aleatórios do seu próprio acervo logo abaixo da abertura.</small></span>
+        <input name="carousel_enabled" type="checkbox" role="switch">
+      </label>
+      <label class="field"><span>Intervalo do carrossel (segundos)</span><input name="carousel_interval_seconds" type="number" min="5" max="300" required></label>
       <div class="form-actions"><button class="button primary" type="submit">Salvar configurações</button></div>
     </form>
-    <div class="provider-section">
+
+    <section class="provider-section branding-section">
+      <div class="section-title"><div><h3>Identidade visual</h3><p>PNG, JPEG, WebP, GIF ou ICO, com até 5 MiB. Tudo fica armazenado localmente.</p></div></div>
+      <div class="branding-grid">
+        <article class="asset-control" data-branding-kind="logo">
+          <div class="asset-preview"><img hidden alt="Prévia do logo"><span>EL</span></div>
+          <div><strong>Logo</strong><small>Cabeçalho da biblioteca</small></div>
+          <label class="button ghost small">Escolher<input type="file" hidden accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon"></label>
+          <button class="button danger small" type="button" data-branding-remove>Excluir</button>
+        </article>
+        <article class="asset-control" data-branding-kind="favicon">
+          <div class="asset-preview square"><img hidden alt="Prévia do favicon"><span>EL</span></div>
+          <div><strong>Favicon</strong><small>Ícone da aba</small></div>
+          <label class="button ghost small">Escolher<input type="file" hidden accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon"></label>
+          <button class="button danger small" type="button" data-branding-remove>Excluir</button>
+        </article>
+        <article class="asset-control" data-branding-kind="hero">
+          <div class="asset-preview landscape"><img hidden alt="Prévia da imagem de abertura"><span>Imagem</span></div>
+          <div><strong>Imagem de abertura</strong><small>Área “Sua biblioteca particular”</small></div>
+          <label class="button ghost small">Escolher<input type="file" hidden accept="image/png,image/jpeg,image/webp,image/gif"></label>
+          <button class="button danger small" type="button" data-branding-remove>Excluir</button>
+        </article>
+      </div>
+    </section>
+
+    <section class="provider-section collection-admin">
+      <div class="section-title"><div><h3>Coleções</h3><p>Organize a estante em listas próprias, além de autor e assunto.</p></div></div>
+      <div id="collection-list" class="collection-list"></div>
+      <form id="collection-form" class="inline-admin-form">
+        <input name="name" required maxlength="80" placeholder="Nome da nova coleção">
+        <input name="color" type="color" value="#6e816a" aria-label="Cor da coleção">
+        <button class="button primary small" type="submit">Criar coleção</button>
+      </form>
+    </section>
+
+    <section class="provider-section maintenance-section">
+      <div class="section-title"><div><h3>Saúde e manutenção</h3><p>Diagnóstico local do catálogo e operações administrativas.</p></div><button class="button ghost small" id="refresh-health" type="button">Atualizar painel</button></div>
+      <div id="health-grid" class="health-grid"><p class="detail-description">Abra o painel para carregar o diagnóstico.</p></div>
+      <details class="admin-disclosure" id="duplicates-panel"><summary>Duplicatas para revisar <b id="duplicate-count">0</b></summary><div id="duplicate-list" class="duplicate-list"></div></details>
+      <details class="admin-disclosure"><summary>Backup e restauração</summary>
+        <div class="admin-disclosure-body">
+          <p>O pacote inclui catálogo, progresso, notas, coleções, capas e identidade visual. Os PDFs originais não são duplicados.</p>
+          <div class="maintenance-actions"><button class="button primary small" id="create-backup" type="button">Criar backup agora</button><label class="button ghost small">Restaurar pacote<input id="restore-input" type="file" hidden accept=".zip,application/zip"></label></div>
+          <div id="backup-list" class="backup-list"></div>
+        </div>
+      </details>
+      <details class="admin-disclosure"><summary>Capas automáticas e OPDS</summary>
+        <div class="admin-disclosure-body">
+          <div class="maintenance-actions"><button class="button ghost small" id="generate-covers" type="button">Gerar capas pendentes</button><a class="button ghost small" href="/api/opds" target="_blank">Abrir catálogo OPDS</a></div>
+          <form id="opds-import-form" class="inline-admin-form"><input name="url" type="url" required placeholder="https://servidor/catalog.xml"><button class="button primary small" type="submit">Importar livros do OPDS</button></form>
+          <small>A importação exige rede habilitada e só ocorre após confirmação explícita.</small>
+        </div>
+      </details>
+      <div class="auth-status"><span aria-hidden="true">⌾</span><div><strong id="auth-status-title">Proteção da API</strong><small id="auth-status-detail">Verificando configuração…</small></div></div>
+    </section>
+
+    <section class="provider-section">
       <div class="section-title"><div><h3>Fontes de metadados</h3><p>Open Library e Google Books já vêm configurados.</p></div><button class="button ghost small" id="show-provider-form" type="button">Adicionar fonte</button></div>
       <div id="provider-list" class="provider-list"></div>
       <form id="provider-form" class="provider-form hidden">
@@ -87,7 +218,8 @@
         <label class="field wide"><span>URL base</span><input name="base_url" type="url" required placeholder="https://exemplo.org"></label>
         <button class="button primary small" type="submit">Adicionar</button>
       </form>
-    </div>
+    </section>
+    <footer class="settings-footer"><a href="https://www.fabianocesar.com" target="_blank" rel="noreferrer">Desenvolvido por FACRF.</a><span>Software livre · GPL v3</span></footer>
   </dialog>
 
   <section id="reader" class="reader hidden" aria-label="Leitor">

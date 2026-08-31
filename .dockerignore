@@ -2,8 +2,10 @@ target
 data
 .git
 .env
+node_modules
+playwright-report
+tests/runtime-data-*
 *.pdf
 *.epub
 *.mobi
 *.azw*
-

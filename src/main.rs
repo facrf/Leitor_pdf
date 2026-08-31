@@ -1,13 +1,20 @@
 mod api;
+mod auth;
+mod backup;
 mod config;
+mod covers;
 mod db;
 mod error;
 mod metadata;
 mod models;
+mod opds;
 mod readers;
 mod scanner;
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use api::AppState;
 use axum::Router;
@@ -28,6 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::from_env();
     tokio::fs::create_dir_all(&config.covers_dir).await?;
+    tokio::fs::create_dir_all(&config.branding_dir).await?;
+    tokio::fs::create_dir_all(&config.backup_dir).await?;
     let db = Database::open(&config.database_path, &config.initial_library_root).await?;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -38,6 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db,
         config: config.clone(),
         http,
+        scan_status: Arc::new(Mutex::new(scanner::ScanStatus::idle())),
     };
     let app = Router::new()
         .nest("/api", api::router(state))

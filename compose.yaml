@@ -12,6 +12,10 @@ services:
       LIBRARY_ROOT: /pdf
       DATABASE_PATH: /data/library.db
       COVERS_DIR: /data/covers
+      BRANDING_DIR: /data/branding
+      BACKUP_DIR: /data/backups
+      AUTH_USERNAME: ${AUTH_USERNAME:-}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
       GOOGLE_BOOKS_API_KEY: ${GOOGLE_BOOKS_API_KEY:-}
       RUST_LOG: ${RUST_LOG:-estante_livre=info,tower_http=info}
     volumes:

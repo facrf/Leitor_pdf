@@ -122,23 +122,7 @@ pub async fn download_cover(
     client: &reqwest::Client,
     url: &str,
 ) -> AppResult<(Vec<u8>, &'static str)> {
-    let parsed =
-        url::Url::parse(url).map_err(|_| AppError::BadRequest("URL de capa invalida".into()))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(AppError::BadRequest("URL de capa deve usar HTTP(S)".into()));
-    }
-    if let Some(host) = parsed.host_str() {
-        if host.eq_ignore_ascii_case("localhost") || host.ends_with(".local") {
-            return Err(AppError::BadRequest("host de capa local recusado".into()));
-        }
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            if ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) {
-                return Err(AppError::BadRequest(
-                    "endereco de capa privado recusado".into(),
-                ));
-            }
-        }
-    }
+    let parsed = validate_public_http_url(url)?;
     let response = client.get(parsed).send().await?.error_for_status()?;
     if response
         .content_length()
@@ -170,6 +154,25 @@ pub async fn download_cover(
         return Err(AppError::BadRequest("capa grande demais".into()));
     }
     Ok((bytes.to_vec(), extension))
+}
+
+pub fn validate_public_http_url(url: &str) -> AppResult<url::Url> {
+    let parsed =
+        url::Url::parse(url).map_err(|_| AppError::BadRequest("URL externa invalida".into()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AppError::BadRequest("URL deve usar HTTP(S)".into()));
+    }
+    if let Some(host) = parsed.host_str() {
+        if host.eq_ignore_ascii_case("localhost") || host.ends_with(".local") {
+            return Err(AppError::BadRequest("host local recusado".into()));
+        }
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) {
+                return Err(AppError::BadRequest("endereco privado recusado".into()));
+            }
+        }
+    }
+    Ok(parsed)
 }
 
 fn is_private_ip(ip: std::net::IpAddr) -> bool {

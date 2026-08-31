@@ -1,0 +1,1 @@
+Mesmo conteudo para o teste seguro de deteccao de duplicatas.

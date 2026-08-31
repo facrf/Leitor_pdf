@@ -1,0 +1,1 @@
+Fixture local para validar catalogacao, busca e colecoes da Estante Livre.
