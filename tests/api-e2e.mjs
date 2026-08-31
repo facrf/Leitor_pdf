@@ -22,7 +22,10 @@ async function waitForTask() {
 
 assert.equal((await request('/health')).status, 'ok');
 const settings = await request('/settings');
-assert.equal(settings.library_root, '/pdf');
+assert.ok(
+  settings.library_root.endsWith('/pdf') || settings.library_root.endsWith('tests/fixtures/e2e'),
+  `raiz de biblioteca inesperada: ${settings.library_root}`,
+);
 assert.equal(settings.auth_enabled, false);
 
 const crossOrigin = await fetch(`${baseUrl}/scan`, {

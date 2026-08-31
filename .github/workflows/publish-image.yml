@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Obter código
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Preparar Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -38,7 +38,7 @@ jobs:
       - name: Validar volume de 2.287 livros
         run: cargo test --locked indexes_2287_files -- --ignored
       - name: Preparar Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -56,7 +56,7 @@ jobs:
         run: npm run test:browser
       - name: Preservar relatório do navegador em caso de falha
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: playwright-report
           path: |
@@ -76,7 +76,7 @@ jobs:
     if: github.event_name != 'pull_request'
     steps:
       - name: Obter código
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Preparar emulação para ARM
         uses: docker/setup-qemu-action@v3
