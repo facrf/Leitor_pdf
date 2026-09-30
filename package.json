@@ -4,7 +4,7 @@
   "private": true,
   "description": "Testes de contrato e navegador da interface Estante Livre",
   "scripts": {
-    "test:ui": "node --check web/app.js && node tests/ui-smoke.mjs",
+    "test:ui": "node --check web/app.js && node tests/ui-smoke.mjs && node tests/progress-save.mjs",
     "test:api": "node tests/run-server-test.mjs tests/api-e2e.mjs",
     "test:auth": "node tests/run-server-test.mjs tests/auth-e2e.mjs",
     "test:browser": "playwright test",

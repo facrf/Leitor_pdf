@@ -54,3 +54,9 @@ Este documento estabelece as regras de escopo, segurança, boas práticas e limi
 - Antes de aplicar alterações complexas, analise os impactos nos módulos existentes.
 - Sempre verifique a sintaxe e rode os testes relevantes antes de finalizar uma tarefa.
 - Mantenha a documentação (como `README.md` e este `AGENTS.md`) sempre sincronizada com as mudanças arquiteturais.
+
+## 6. Retomada de trabalho
+
+- Ao retomar uma tarefa, leia `CONTINUAR.md` (se existir) e confira `git status`/`git diff` antes de editar.
+- Antes de encerrar trabalho incompleto, atualize `CONTINUAR.md` com mudanças realizadas, testes realmente executados, limitações e próximo passo concreto.
+- Não registre segredos ou conteúdo privado do acervo; não marque itens pendentes como concluídos. O checkpoint não substitui a verificação do estado atual do código.

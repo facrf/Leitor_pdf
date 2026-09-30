@@ -104,6 +104,8 @@ Exclusão exige JSON `{ "filename": "nome-exato.pdf" }`. O servidor compara com 
 
 ## Leitura, progresso e notas
 
+Ao salvar progresso, `location` deve ser um objeto JSON de até 8 KiB serializado e `percent` deve ser finito, entre 0 e 100. Entradas inválidas recebem HTTP 400.
+
 | Método e rota | Finalidade |
 |---|---|
 | `PUT /books/{id}/progress` | Salva localização JSON e percentual de 0 a 100. |

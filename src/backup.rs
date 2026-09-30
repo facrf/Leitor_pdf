@@ -31,6 +31,16 @@ pub struct RestorePackage {
     pub branding: PathBuf,
 }
 
+impl Drop for RestorePackage {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.root) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(path = %self.root.display(), %error, "falha ao limpar pacote extraido");
+            }
+        }
+    }
+}
+
 /// Cria um pacote consistente do catalogo e dos recursos gerados. Os livros
 /// originais nao sao incluidos para que um acervo de 150 GB continue pratico.
 pub async fn create(db: &Database, config: &Config) -> AppResult<BackupInfo> {
@@ -113,53 +123,91 @@ pub async fn unpack(archive_path: PathBuf, config: &Config) -> AppResult<Restore
         ".restore-{}-{suffix}",
         Utc::now().timestamp_millis()
     ));
-    tokio::fs::create_dir_all(&root).await?;
-    let root_for_task = root.clone();
-    let extraction =
-        tokio::task::spawn_blocking(move || extract_package(&archive_path, &root_for_task))
-            .await
-            .map_err(|error| AppError::Internal(error.to_string()))
-            .and_then(|result| result);
-    if let Err(error) = extraction {
-        let _ = tokio::fs::remove_dir_all(&root).await;
-        return Err(match error {
-            AppError::Zip(error) => AppError::BadRequest(format!("arquivo ZIP invalido: {error}")),
-            other => other,
-        });
-    }
-    let database = root.join("library.db");
-    if !database.is_file() {
-        let _ = tokio::fs::remove_dir_all(&root).await;
-        return Err(AppError::BadRequest(
-            "o pacote nao contem library.db".into(),
-        ));
-    }
-    Ok(RestorePackage {
-        database,
+    // A propriedade acompanha o worker: cancelar o await nao remove uma
+    // pasta que ainda esta sendo escrita pelo spawn_blocking.
+    std::fs::create_dir(&root)?;
+    let package = RestorePackage {
+        database: root.join("library.db"),
         covers: root.join("covers"),
         branding: root.join("branding"),
         root,
-    })
+    };
+    tokio::task::spawn_blocking(move || {
+        extract_package(&archive_path, &package.root).map_err(|error| match error {
+            AppError::Zip(error) => AppError::BadRequest(format!("arquivo ZIP invalido: {error}")),
+            other => other,
+        })?;
+        if !package.database.is_file() {
+            return Err(AppError::BadRequest("o pacote nao contem library.db".into()));
+        }
+        Ok(package)
+    }).await.map_err(|error| AppError::Internal(error.to_string()))?
 }
 
-pub async fn copy_restored_assets(package: &RestorePackage, config: &Config) -> AppResult<()> {
-    copy_tree(&package.covers, &config.covers_dir).await?;
-    copy_tree(&package.branding, &config.branding_dir).await?;
-    Ok(())
+/// Guarda as pastas anteriores ate o banco confirmar a restauracao.
+/// Drop reverte inclusive quando a requisicao e cancelada durante um await.
+pub struct AssetRestore {
+    entries: Vec<(PathBuf, PathBuf, PathBuf, bool, bool)>,
+    committed: bool,
 }
 
-async fn copy_tree(source: &Path, destination: &Path) -> AppResult<()> {
-    if !source.is_dir() {
-        return Ok(());
+impl AssetRestore {
+    pub fn install(package: &RestorePackage, config: &Config) -> AppResult<Self> {
+        let mut restore = Self { entries: Vec::new(), committed: false };
+        for (source, target) in [(&package.covers, &config.covers_dir), (&package.branding, &config.branding_dir)] {
+            let suffix = rand::random::<u64>();
+            let stage = target.with_extension(format!("restore-stage-{suffix}"));
+            let old = target.with_extension(format!("restore-old-{suffix}"));
+            std::fs::create_dir(&stage)?;
+            restore.entries.push((target.clone(), stage.clone(), old.clone(), false, false));
+            if source.is_dir() {
+                for entry in WalkDir::new(source).follow_links(false) {
+                    let entry = entry.map_err(|error| AppError::Internal(error.to_string()))?;
+                    let relative = entry.path().strip_prefix(source)
+                        .map_err(|error| AppError::Internal(error.to_string()))?;
+                    if entry.file_type().is_dir() {
+                        std::fs::create_dir_all(stage.join(relative))?;
+                    } else if entry.file_type().is_file() {
+                        std::fs::copy(entry.path(), stage.join(relative))?;
+                    } else {
+                        return Err(AppError::BadRequest("recurso de backup nao e arquivo regular".into()));
+                    }
+                }
+            }
+            let entry = restore.entries.last_mut().ok_or_else(|| AppError::Internal("restauracao vazia".into()))?;
+            if target.exists() {
+                std::fs::rename(target, &old)?;
+                entry.3 = true;
+            }
+            std::fs::rename(&stage, target)?;
+            entry.4 = true;
+        }
+        Ok(restore)
     }
-    tokio::fs::create_dir_all(destination).await?;
-    let mut entries = tokio::fs::read_dir(source).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        if entry.file_type().await?.is_file() {
-            tokio::fs::copy(entry.path(), destination.join(entry.file_name())).await?;
+
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for AssetRestore {
+    fn drop(&mut self) {
+        for (target, stage, old, had_old, installed) in self.entries.iter().rev() {
+            let result = if self.committed {
+                if *had_old { std::fs::remove_dir_all(old) } else { Ok(()) }
+            } else {
+                (|| -> std::io::Result<()> {
+                    if *installed { std::fs::remove_dir_all(target)?; }
+                    if *had_old { std::fs::rename(old, target)?; }
+                    Ok(())
+                })()
+            };
+            if let Err(error) = result {
+                tracing::error!(path = %old.display(), %error, "restauracao: pasta de recuperacao preservada");
+            }
+            if stage.exists() { let _ = std::fs::remove_dir_all(stage); }
         }
     }
-    Ok(())
 }
 
 fn write_package(
@@ -273,4 +321,57 @@ fn extract_package(archive_path: &Path, destination: &Path) -> AppResult<()> {
         file.flush()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_archive_does_not_leave_extraction_directory() {
+        let root = PathBuf::from(format!(".test-unpack-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let archive = root.join("invalid.zip");
+        std::fs::write(&archive, b"not a ZIP").unwrap();
+        let mut config = Config::from_env();
+        config.backup_dir = root.clone();
+        assert!(unpack(archive, &config).await.is_err());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn assets_roll_back_on_drop_and_replace_on_commit() {
+        let root = PathBuf::from(format!(".test-restore-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let mut config = Config::from_env();
+        config.covers_dir = root.join("live-covers");
+        config.branding_dir = root.join("live-branding");
+        let package = RestorePackage {
+            root: root.clone(), database: root.join("unused.db"),
+            covers: root.join("incoming-covers"), branding: root.join("incoming-branding"),
+        };
+        for path in [&config.covers_dir, &config.branding_dir, &package.covers, &package.branding] {
+            std::fs::create_dir(path).unwrap();
+        }
+        std::fs::write(config.covers_dir.join("old.png"), b"old").unwrap();
+        std::fs::write(package.covers.join("new.png"), b"new").unwrap();
+        {
+            let _transaction = AssetRestore::install(&package, &config).unwrap();
+            assert!(config.covers_dir.join("new.png").exists());
+            assert!(!config.covers_dir.join("old.png").exists());
+        }
+        assert_eq!(std::fs::read(config.covers_dir.join("old.png")).unwrap(), b"old");
+        assert!(!config.covers_dir.join("new.png").exists());
+        // A segunda pasta falha; a primeira deve ser reposta tambem.
+        let branding = config.branding_dir.clone();
+        config.branding_dir = root.join("missing-parent").join("branding");
+        assert!(AssetRestore::install(&package, &config).is_err());
+        assert!(config.covers_dir.join("old.png").exists());
+        config.branding_dir = branding;
+        AssetRestore::install(&package, &config).unwrap().commit();
+        assert_eq!(std::fs::read(config.covers_dir.join("new.png")).unwrap(), b"new");
+        assert!(!config.covers_dir.join("old.png").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

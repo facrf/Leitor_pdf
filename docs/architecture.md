@@ -22,6 +22,7 @@ src/api.rs ─────── src/db.rs ─────── SQLite
     ├── src/metadata.rs ── fontes habilitadas pelo usuário
     ├── src/covers.rs ─── Poppler em baixa prioridade
     ├── src/opds.rs ───── exportação/importação explícita
+    ├── src/pending_file.rs ─ limpeza de arquivos incompletos
     └── src/backup.rs ─── ZIP do SQLite e recursos locais
 ```
 
@@ -58,7 +59,7 @@ Antes da leitura, o scanner carrega do SQLite um índice por caminho com tamanho
 
 O perfil econômico não abre PDF/EPUB e usa o nome do arquivo. O equilibrado extrai metadados e intercala trabalho com descanso proporcional, visando aproximadamente 65% de ciclo ativo do worker. O completo não adiciona pausas. Ao terminar, todos os resultados são sincronizados em uma transação SQLite; arquivos ausentes passam a indisponíveis. A mesma trava em memória impede que varredura e geração de capas rodem simultaneamente.
 
-O saneamento de metadados reconhece UTF-8, UTF-16 BE/LE e Windows-1252. Textos com substituições Unicode, controles, tamanho excessivo ou alta densidade de símbolos são rejeitados. Isso impede títulos binários e permite usar o nome do arquivo como fallback. Durante o `upsert`, somente títulos existentes identificados como corrompidos são substituídos, protegendo edições manuais válidas.
+O saneamento de metadados reconhece UTF-8, UTF-16 BE/LE e Windows-1252. Textos com substituições Unicode, controles, tamanho excessivo ou alta densidade de símbolos são rejeitados. `metadata_scanned` registra a tentativa de extração PDF/EPUB, permitindo enriquecer arquivos inalterados ao trocar do perfil econômico para completo. `metadata_edited` protege alterações manuais e resultados externos durante o `upsert`; títulos corrompidos continuam reparáveis. Livros legados têm título/autor preservados por precaução.
 
 ## Formatos e leitura
 
@@ -86,7 +87,11 @@ O navegador nunca recebe uma URL remota de capa. Hosts locais e endereços IP pr
 
 ## Backup e troca do banco
 
-O backup usa `VACUUM INTO` sob o mutex da conexão, obtendo um arquivo SQLite consistente sem copiar WAL em uso. O ZIP inclui somente banco, capas, identidade e manifesto. Na restauração, a extração ocorre em uma pasta privada dentro de `BACKUP_DIR`, com `enclosed_name`, lista de prefixos permitidos, até 10.000 entradas e 2 GiB descompactados. `PRAGMA integrity_check` e a tabela `books` são verificados antes de uma troca do banco com arquivo anterior para rollback.
+O backup usa `VACUUM INTO` sob o mutex da conexão, obtendo um arquivo SQLite consistente sem copiar WAL em uso. O ZIP inclui somente banco, capas, identidade e manifesto. Na restauração, a extração ocorre em pasta exclusiva dentro de `BACKUP_DIR`, com `enclosed_name`, lista de prefixos permitidos, até 10.000 entradas e 2 GiB declarados descompactados. O pacote acompanha o worker e limpa sua pasta ao ser descartado.
+
+A restauração adquire acesso exclusivo entre handlers HTTP e recusa execução se houver scan/capas em segundo plano. Valida integridade SQLite, schema reconhecido, referências e dados antes de usar a API transacional de backup do SQLite sobre a conexão existente. Pasta da biblioteca e consentimento de rede da instalação são preservados. As pastas anteriores de assets ficam guardadas até o commit e são repostas em caso de falha. Não há transação única entre SQLite e filesystem nem recuperação automática conjunta após queda do processo.
+
+Downloads públicos de capas/OPDS validam DNS e cada redirecionamento, fixam IPs na conexão e desativam proxy de ambiente. Os limites de corpo são aplicados durante a transferência. `PendingFile` remove arquivos criados pela operação se ela falhar/cancelar; falhas de limpeza são registradas nos logs. Provedores manuais mantêm suporte deliberado a endpoints locais.
 
 ## Busca e coleções
 

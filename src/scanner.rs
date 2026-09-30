@@ -81,6 +81,7 @@ pub struct ScannedBook {
     pub page_count: Option<i64>,
     pub content_hash: Option<String>,
     pub unchanged: bool,
+    pub metadata_scanned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +92,7 @@ pub struct KnownBook {
     pub modified_at: i64,
     pub page_count: Option<i64>,
     pub content_hash: Option<String>,
+    pub metadata_scanned: bool,
 }
 
 /// Retrato serializavel do trabalho de varredura consultado pela interface.
@@ -277,10 +279,12 @@ fn scan_file(
         .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
         .unwrap_or_default();
     let size = metadata.len() as i64;
+    let needs_metadata = extract_metadata && matches!(extension, "pdf" | "epub");
     if let Some(known) = known_books.get(&relative_path) {
         if known.size == size
             && known.modified_at == modified_at
             && !metadata_looks_corrupt(&known.title)
+            && (!needs_metadata || known.metadata_scanned)
         {
             let content_hash = match &known.content_hash {
                 Some(value) => Some(value.clone()),
@@ -297,6 +301,7 @@ fn scan_file(
                 page_count: known.page_count,
                 content_hash,
                 unchanged: true,
+                metadata_scanned: known.metadata_scanned,
             });
         }
     }
@@ -323,6 +328,7 @@ fn scan_file(
         page_count,
         content_hash,
         unchanged: false,
+        metadata_scanned: needs_metadata,
     })
 }
 
@@ -610,6 +616,7 @@ mod tests {
                 modified_at: original.modified_at,
                 page_count: original.page_count,
                 content_hash: original.content_hash.clone(),
+                metadata_scanned: original.metadata_scanned,
             },
         )]);
         let (second, _, _) =

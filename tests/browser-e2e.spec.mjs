@@ -36,6 +36,8 @@ test('cataloga, filtra, organiza, le, anota e cria backup pela interface', async
   await expect(page.locator('#reader')).toBeVisible();
   await expect(page.frameLocator('iframe[title="Leitor de texto"]').locator('body'))
     .toContainText('Fixture local para validar catalogacao');
+  await page.locator('#percent-input').fill('37');
+  await page.locator('#percent-input').dispatchEvent('change');
 
   await page.locator('#notes-toggle').click();
   await page.locator('#note-form textarea').fill('Anotacao criada pelo teste de navegador.');
@@ -43,6 +45,12 @@ test('cataloga, filtra, organiza, le, anota e cria backup pela interface', async
   await expect(page.locator('#notes-list')).toContainText('Anotacao criada pelo teste de navegador.');
   await page.locator('#reader-close').click();
   await expect(page.locator('#reading-desk')).toBeVisible();
+  await page.reload();
+  await page.locator('#reading-desk-list [data-book-id]').first().click();
+  await page.locator('#read-book').click();
+  await expect(page.locator('#percent-input')).toHaveValue('37');
+  await page.locator('#reader-close').click();
+  await expect(page.locator('#reader')).toBeHidden();
 
   await page.locator('#settings-button').click();
   await page.locator('summary', { hasText: 'Backup e restauração' }).click();

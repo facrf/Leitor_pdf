@@ -54,21 +54,15 @@ pub async fn import_catalog(
     library_root: &Path,
 ) -> AppResult<ImportReport> {
     let parsed = metadata::validate_public_http_url(feed_url)?;
-    let response = client
-        .get(parsed.clone())
-        .send()
-        .await?
-        .error_for_status()?;
+    let response = metadata::public_get(parsed.clone()).await?;
+    let parsed = response.url().clone();
     if response
         .content_length()
         .is_some_and(|length| length > 5 * 1024 * 1024)
     {
         return Err(AppError::BadRequest("catalogo OPDS grande demais".into()));
     }
-    let bytes = response.bytes().await?;
-    if bytes.len() > 5 * 1024 * 1024 {
-        return Err(AppError::BadRequest("catalogo OPDS grande demais".into()));
-    }
+    let bytes = metadata::limited_body(response, 5 * 1024 * 1024).await?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| AppError::BadRequest("catalogo OPDS nao esta em UTF-8".into()))?;
     let document = roxmltree::Document::parse(text)
@@ -135,7 +129,6 @@ pub async fn import_catalog(
             Err(error) => {
                 skipped += 1;
                 warnings.push(format!("{title}: {error}"));
-                let _ = tokio::fs::remove_file(destination).await;
             }
         }
     }
@@ -148,22 +141,24 @@ pub async fn import_catalog(
 }
 
 async fn download_book(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     url: url::Url,
     destination: &Path,
 ) -> AppResult<()> {
-    let mut response = client.get(url).send().await?.error_for_status()?;
+    let mut response = metadata::public_get(url).await?;
     if response
         .content_length()
         .is_some_and(|length| length > 1024 * 1024 * 1024)
     {
         return Err(AppError::BadRequest("livro OPDS excede 1 GiB".into()));
     }
+    let mut cleanup = crate::pending_file::PendingFile::default();
     let mut output = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(destination)
         .await?;
+    cleanup.track(destination.to_path_buf());
     let mut written = 0_u64;
     while let Some(chunk) = response.chunk().await? {
         written += chunk.len() as u64;
@@ -173,6 +168,7 @@ async fn download_book(
         output.write_all(&chunk).await?;
     }
     output.flush().await?;
+    cleanup.commit();
     Ok(())
 }
 

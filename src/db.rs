@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
 };
 
@@ -21,7 +21,6 @@ use crate::{
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
-    path: Arc<PathBuf>,
 }
 
 impl Database {
@@ -71,7 +70,6 @@ impl Database {
         }
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
-            path: Arc::new(path.to_path_buf()),
         })
     }
 
@@ -100,41 +98,23 @@ impl Database {
                 "o pacote nao contem um catalogo Estante Livre valido".into(),
             ));
         }
+        validate_restore_schema(&candidate)?;
         drop(candidate);
 
         let mut conn = self.connection.lock().await;
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-        let placeholder = Connection::open_in_memory()?;
-        let previous = std::mem::replace(&mut *conn, placeholder);
-        drop(previous);
-
-        let restore_new = self
-            .path
-            .with_extension(format!("restore-{}", Utc::now().timestamp_millis()));
-        let restore_old = self
-            .path
-            .with_extension(format!("before-restore-{}", Utc::now().timestamp_millis()));
-        std::fs::copy(source, &restore_new)?;
-        if self.path.exists() {
-            std::fs::rename(self.path.as_ref(), &restore_old)?;
+        // O source e a copia extraida do ZIP. Migre antes de copiar para o
+        // destino. SQLite faz commit apenas ao concluir; Drop aborta se falhar.
+        let candidate = open_connection(source)?;
+        validate_restore_data(&candidate)?;
+        // Estes valores descrevem esta instalacao e seu consentimento de rede.
+        for key in ["library_root", "network_metadata_enabled"] {
+            let value: String = conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| row.get(0))?;
+            candidate.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
         }
-        if let Err(error) = std::fs::rename(&restore_new, self.path.as_ref()) {
-            let _ = std::fs::rename(&restore_old, self.path.as_ref());
-            *conn = Connection::open(self.path.as_ref())?;
-            return Err(error.into());
-        }
-        match open_connection(self.path.as_ref()) {
-            Ok(replacement) => {
-                *conn = replacement;
-                let _ = std::fs::remove_file(restore_old);
-                Ok(())
-            }
-            Err(error) => {
-                let _ = std::fs::remove_file(self.path.as_ref());
-                let _ = std::fs::rename(&restore_old, self.path.as_ref());
-                *conn = open_connection(self.path.as_ref())?;
-                Err(error)
-            }
+        let backup = rusqlite::backup::Backup::new(&candidate, &mut conn)?;
+        match backup.step(-1)? {
+            rusqlite::backup::StepResult::Done => Ok(()),
+            _ => Err(AppError::BadRequest("banco ocupado; tente restaurar novamente".into())),
         }
     }
 
@@ -166,7 +146,7 @@ impl Database {
     pub async fn scan_index(&self) -> AppResult<HashMap<String, KnownBook>> {
         let conn = self.connection.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT relative_path, title, author, size, modified_at, page_count, content_hash
+            "SELECT relative_path, title, author, size, modified_at, page_count, content_hash, metadata_scanned
              FROM books",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -179,6 +159,7 @@ impl Database {
                     modified_at: row.get(4)?,
                     page_count: row.get(5)?,
                     content_hash: row.get(6)?,
+                    metadata_scanned: row.get(7)?,
                 },
             ))
         })?;
@@ -620,7 +601,8 @@ impl Database {
         let conn = self.connection.lock().await;
         let changed = conn.execute(
             "UPDATE books SET title=?2, author=?3, description=?4, publisher=?5,
-             published_date=?6, isbn=?7, language=?8, subjects=?9, updated_at=?10 WHERE id=?1",
+             published_date=?6, isbn=?7, language=?8, subjects=?9, updated_at=?10,
+             metadata_edited=1 WHERE id=?1",
             params![
                 id,
                 title,
@@ -650,9 +632,20 @@ impl Database {
     }
 
     pub async fn save_progress(&self, book_id: i64, progress: &SaveProgress) -> AppResult<()> {
-        if !(0.0..=100.0).contains(&progress.percent) {
+        if !progress.percent.is_finite() || !(0.0..=100.0).contains(&progress.percent) {
             return Err(AppError::BadRequest(
                 "o progresso deve estar entre 0 e 100".into(),
+            ));
+        }
+        if !progress.location.is_object() {
+            return Err(AppError::BadRequest(
+                "a posicao de leitura deve ser um objeto".into(),
+            ));
+        }
+        let location = progress.location.to_string();
+        if location.len() > 8 * 1024 {
+            return Err(AppError::BadRequest(
+                "a posicao de leitura excede o limite de 8 KiB".into(),
             ));
         }
         let conn = self.connection.lock().await;
@@ -660,7 +653,7 @@ impl Database {
             "INSERT INTO reading_progress (book_id, location, percent, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(book_id) DO UPDATE SET location=excluded.location,
              percent=excluded.percent, updated_at=excluded.updated_at",
-            params![book_id, progress.location.to_string(), progress.percent, Utc::now().to_rfc3339()],
+            params![book_id, location, progress.percent, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -850,18 +843,21 @@ fn upsert_scanned(tx: &Transaction<'_>, book: &ScannedBook) -> rusqlite::Result<
     let now = Utc::now().to_rfc3339();
     tx.execute(
         "INSERT INTO books (title, author, filename, relative_path, format, size, modified_at,
-          page_count, content_hash, is_available, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?10)
+          page_count, content_hash, is_available, created_at, updated_at, metadata_scanned)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?10, ?13)
          ON CONFLICT(relative_path) DO UPDATE SET filename=excluded.filename, format=excluded.format,
           size=excluded.size, modified_at=excluded.modified_at, page_count=COALESCE(excluded.page_count, books.page_count),
           content_hash=COALESCE(excluded.content_hash, books.content_hash),
-          title=CASE WHEN ?11 THEN excluded.title ELSE books.title END,
-          author=CASE WHEN ?11 THEN COALESCE(excluded.author, books.author) ELSE books.author END,
+          title=CASE WHEN ?11 OR (books.metadata_edited=0 AND excluded.metadata_scanned=1)
+                THEN excluded.title ELSE books.title END,
+          author=CASE WHEN ?11 OR (books.metadata_edited=0 AND excluded.metadata_scanned=1)
+                THEN COALESCE(excluded.author, books.author) ELSE books.author END,
+          metadata_scanned=excluded.metadata_scanned,
           is_available=1,
           updated_at=CASE WHEN ?12 THEN books.updated_at ELSE excluded.updated_at END",
         params![book.title, book.author, book.filename, book.relative_path, book.format,
                 book.size, book.modified_at, book.page_count, book.content_hash, now,
-                repair_metadata, book.unchanged],
+                repair_metadata, book.unchanged, book.metadata_scanned],
     )?;
     Ok(existing_title.is_none())
 }
@@ -1005,6 +1001,8 @@ CREATE TABLE IF NOT EXISTS books (
     size INTEGER NOT NULL,
     modified_at INTEGER NOT NULL,
     page_count INTEGER,
+    metadata_scanned INTEGER NOT NULL DEFAULT 0,
+    metadata_edited INTEGER NOT NULL DEFAULT 0,
     content_hash TEXT,
     cover_filename TEXT,
     is_available INTEGER NOT NULL DEFAULT 1,
@@ -1073,10 +1071,86 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     if !columns.iter().any(|column| column == "content_hash") {
         connection.execute("ALTER TABLE books ADD COLUMN content_hash TEXT", [])?;
     }
+    if !columns.iter().any(|column| column == "metadata_scanned") {
+        connection.execute("ALTER TABLE books ADD COLUMN metadata_scanned INTEGER NOT NULL DEFAULT 0", [])?;
+    }
+    if !columns.iter().any(|column| column == "metadata_edited") {
+        // Em catalogos antigos nao ha origem dos metadados: preserve todos.
+        // O default permanece 0 para livros novos apos a migracao.
+        connection.execute("ALTER TABLE books ADD COLUMN metadata_edited INTEGER NOT NULL DEFAULT 0", [])?;
+        connection.execute("UPDATE books SET metadata_edited=1", [])?;
+    }
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_books_fingerprint ON books(content_hash, size)",
         [],
     )?;
+    Ok(())
+}
+
+/// Rejeita objetos executaveis e schemas incompletos antes de migrar o pacote.
+fn validate_restore_schema(candidate: &Connection) -> AppResult<()> {
+    let reference = Connection::open_in_memory()?;
+    reference.execute_batch(SCHEMA)?;
+    migrate(&reference)?;
+    let mut objects = candidate.prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")?;
+    for row in objects.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
+        let (kind, name) = row?;
+        let known: bool = reference.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2)", params![kind, name], |row| row.get(0))?;
+        if !known || !matches!(kind.as_str(), "table" | "index") {
+            return Err(AppError::BadRequest("backup contem objetos SQL nao reconhecidos".into()));
+        }
+    }
+    let mut tables = reference.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
+    for table in tables.query_map([], |row| row.get::<_, String>(0))? {
+        let table = table?;
+        let mut fields = reference.prepare(&format!("PRAGMA table_info({table})"))?;
+        let fields = fields.query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let required: Vec<_> = fields.iter().filter(|name| !matches!(name.as_str(), "content_hash" | "metadata_scanned" | "metadata_edited")).cloned().collect();
+        candidate.prepare(&format!("SELECT {} FROM {table} LIMIT 0", required.join(",")))
+            .map_err(|_| AppError::BadRequest(format!("schema incompleto na tabela {table}")))?;
+    }
+    Ok(())
+}
+
+/// Verifica referencias, caminhos e JSON consumidos pelo catalogo e leitores.
+fn validate_restore_data(candidate: &Connection) -> AppResult<()> {
+    // SaveNote antigo aceita location omitido (JSON null).
+    candidate.execute("UPDATE notes SET location='{}' WHERE TRIM(location)='null'", [])?;
+    if candidate.prepare("PRAGMA foreign_key_check")?.query([])?.next()?.is_some() {
+        return Err(AppError::BadRequest("backup contem referencias invalidas".into()));
+    }
+    let mut books = candidate.prepare("SELECT relative_path, cover_filename, subjects FROM books")?;
+    for row in books.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)))? {
+        let (relative, cover, subjects) = row?;
+        crate::scanner::path_to_safe_relative(Path::new(&relative))?;
+        if let Some(cover) = cover {
+            if Path::new(&cover).file_name().and_then(|name| name.to_str()) != Some(cover.as_str()) || cover.contains('\\') {
+                return Err(AppError::BadRequest("caminho de capa invalido no backup".into()));
+            }
+        }
+        serde_json::from_str::<Vec<String>>(&subjects).map_err(|_| AppError::BadRequest("assuntos invalidos no backup".into()))?;
+    }
+    for table in ["reading_progress", "notes"] {
+        let mut stmt = candidate.prepare(&format!("SELECT location FROM {table}"))?;
+        for value in stmt.query_map([], |row| row.get::<_, String>(0))? {
+            let value = value?;
+            let location: serde_json::Value = serde_json::from_str(&value)
+                .map_err(|_| AppError::BadRequest("posicao invalida no backup".into()))?;
+            if value.len() > 8192 || !location.is_object() {
+                return Err(AppError::BadRequest("posicao invalida no backup".into()));
+            }
+            for key in ["page", "page_index", "chapter", "percent"] {
+                if let Some(number) = location.get(key) {
+                    if number.as_f64().is_none_or(|value| !value.is_finite() || value < 0.0) {
+                        return Err(AppError::BadRequest("posicao numerica invalida no backup".into()));
+                    }
+                }
+            }
+        }
+    }
+    let invalid: bool = candidate.query_row("SELECT EXISTS(SELECT 1 FROM reading_progress WHERE percent IS NULL OR typeof(percent) NOT IN ('integer','real') OR percent < 0 OR percent > 100)", [], |row| row.get(0))?;
+    if invalid { return Err(AppError::BadRequest("progresso invalido no backup".into())); }
     Ok(())
 }
 
@@ -1087,4 +1161,88 @@ fn open_connection(path: &Path) -> AppResult<Connection> {
     connection.execute_batch(SCHEMA)?;
     migrate(&connection)?;
     Ok(connection)
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    #[test]
+    fn restore_validation_rejects_triggers_and_unsafe_book_paths() {
+        let candidate = Connection::open_in_memory().unwrap();
+        candidate.execute_batch(SCHEMA).unwrap();
+        migrate(&candidate).unwrap();
+        validate_restore_schema(&candidate).unwrap();
+        validate_restore_data(&candidate).unwrap();
+        candidate.execute_batch("CREATE TRIGGER unexpected AFTER INSERT ON settings BEGIN DELETE FROM books; END;").unwrap();
+        assert!(validate_restore_schema(&candidate).is_err());
+        candidate.execute_batch("DROP TRIGGER unexpected;").unwrap();
+        candidate.execute("INSERT INTO books(title,filename,relative_path,format,size,modified_at,created_at,updated_at) VALUES('test','test.txt','../test.txt','txt',1,1,'now','now')", []).unwrap();
+        assert!(validate_restore_data(&candidate).is_err());
+        candidate.execute("UPDATE books SET relative_path='test.txt', subjects='not JSON'", []).unwrap();
+        assert!(validate_restore_data(&candidate).is_err());
+    }
+
+    #[tokio::test]
+    async fn richer_scan_enriches_once_and_preserves_manual_edits() {
+        use crate::scanner::{scan, ScanProfile};
+        use std::io::Write;
+        let root = std::path::PathBuf::from(format!(".test-profile-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let mut archive = zip::ZipWriter::new(std::fs::File::create(root.join("fallback.epub")).unwrap());
+            let options = zip::write::SimpleFileOptions::default();
+            archive.start_file("META-INF/container.xml", options).unwrap();
+            archive.write_all(b"<container><rootfile full-path='book.opf'/></container>").unwrap();
+            archive.start_file("book.opf", options).unwrap();
+            archive.write_all(b"<package><metadata><title>Embedded title</title><creator>Embedded author</creator></metadata></package>").unwrap();
+            archive.finish().unwrap();
+        }
+        let db = Database::open(&root.join("catalog.db"), &root).await.unwrap();
+        let (books, _, _) = scan(&root, ScanProfile::Economical, &HashMap::new(), |_| {}).unwrap();
+        assert!(!books[0].metadata_scanned);
+        db.sync_scan(&books).await.unwrap();
+        let (books, _, _) = scan(&root, ScanProfile::Complete, &db.scan_index().await.unwrap(), |_| {}).unwrap();
+        assert!(!books[0].unchanged);
+        assert!(books[0].metadata_scanned);
+        db.sync_scan(&books).await.unwrap();
+        let book = db.list_books(&CatalogQuery::default()).await.unwrap().remove(0);
+        assert_eq!(book.title, "Embedded title");
+        assert_eq!(book.author.as_deref(), Some("Embedded author"));
+        let edit: UpdateBook = serde_json::from_value(serde_json::json!({"title": "Manual title", "author": "Manual author"})).unwrap();
+        db.update_book(book.id, &edit).await.unwrap();
+        let mut known = db.scan_index().await.unwrap();
+        known.get_mut("fallback.epub").unwrap().metadata_scanned = false;
+        let (books, _, _) = scan(&root, ScanProfile::Balanced, &known, |_| {}).unwrap();
+        db.sync_scan(&books).await.unwrap();
+        assert_eq!(db.book(book.id).await.unwrap().title, "Manual title");
+        assert_eq!(db.book(book.id).await.unwrap().author.as_deref(), Some("Manual author"));
+        let (books, _, _) = scan(&root, ScanProfile::Complete, &db.scan_index().await.unwrap(), |_| {}).unwrap();
+        assert!(books[0].unchanged);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_keeps_connection_usable_after_success_and_invalid_schema() {
+        let root = std::path::PathBuf::from(format!(".test-db-restore-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let db = Database::open(&root.join("live.db"), &root).await.unwrap();
+        db.set_setting("test-marker", "snapshot").await.unwrap();
+        let snapshot = root.join("snapshot.db");
+        db.snapshot_to(&snapshot).await.unwrap();
+        db.set_setting("test-marker", "changed").await.unwrap();
+        db.replace_from(&snapshot).await.unwrap();
+        assert_eq!(db.setting("test-marker").await.unwrap().as_deref(), Some("snapshot"));
+        let invalid = root.join("invalid.db");
+        {
+            let candidate = Connection::open(&invalid).unwrap();
+            candidate.execute_batch("CREATE TABLE books (invalid_column TEXT);").unwrap();
+        }
+        assert!(db.replace_from(&invalid).await.is_err());
+        assert_eq!(db.setting("test-marker").await.unwrap().as_deref(), Some("snapshot"));
+        db.set_setting("test-marker", "still-writable").await.unwrap();
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -5,6 +5,7 @@ const state = {
   reader: { kind: null, location: {}, percent: 0, items: [] },
   searchTimer: null, scanTimer: null, scanObservedRunning: false,
   carouselIndex: 0, carouselTimer: null,
+  progressSaveTimer: null, progressSaveChain: Promise.resolve(),
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -306,7 +307,7 @@ async function openReader(book) {
   $('#reader-download').href = `/api/books/${book.id}/file?download=true`;
   $('#reader').classList.remove('hidden'); document.body.style.overflow = 'hidden';
   await renderReader();
-  persistProgress();
+  scheduleProgressSave(true);
   loadNotes();
 }
 
@@ -343,7 +344,7 @@ function changePdfPage(step) {
   input.value = page; state.reader.location = { type: 'page', page };
   state.reader.percent = state.currentBook.page_count ? Math.min(100, page / state.currentBook.page_count * 100) : state.reader.percent;
   $('iframe', $('#reader-stage')).src = `/api/books/${state.currentBook.id}/file#page=${page}`;
-  updateReaderLabel(); persistProgress();
+  updateReaderLabel(); scheduleProgressSave();
 }
 
 function renderPagedResource(kind, requestedIndex) {
@@ -358,14 +359,14 @@ function renderPagedResource(kind, requestedIndex) {
   }
   $('#reader-navigation').innerHTML = `<button class="icon-button light" data-reader-step="-1" ${index === 0 ? 'disabled' : ''}>‹</button><span>${index + 1} / ${items.length}</span><button class="icon-button light" data-reader-step="1" ${index === max ? 'disabled' : ''}>›</button>`;
   $$('[data-reader-step]').forEach(button => button.onclick = () => renderPagedResource(kind, index + Number(button.dataset.readerStep)));
-  updateReaderLabel(); persistProgress();
+  updateReaderLabel(); scheduleProgressSave();
 }
 
 function renderPercentNavigation() {
   const value = Math.round(state.reader.percent || 0);
   $('#reader-navigation').innerHTML = `<label>Progresso <input id="percent-input" type="range" min="0" max="100" value="${value}"> <span id="percent-value">${value}%</span></label>`;
-  $('#percent-input').oninput = event => { state.reader.percent = Number(event.target.value); state.reader.location = { type: 'percent', percent: state.reader.percent }; $('#percent-value').textContent = `${state.reader.percent}%`; updateReaderLabel(); };
-  $('#percent-input').onchange = persistProgress;
+  $('#percent-input').oninput = event => { state.reader.percent = Number(event.target.value); state.reader.location = { type: 'percent', percent: state.reader.percent }; $('#percent-value').textContent = `${state.reader.percent}%`; updateReaderLabel(); scheduleProgressSave(); };
+  $('#percent-input').onchange = () => scheduleProgressSave(true);
   updateReaderLabel();
 }
 
@@ -374,9 +375,28 @@ function updateReaderLabel() {
   $('#reader-location').textContent = location.page ? `Página ${location.page} · ${Math.round(state.reader.percent)}%` : location.type === 'chapter' ? `Capítulo ${location.chapter + 1} · ${Math.round(state.reader.percent)}%` : `${Math.round(state.reader.percent)}% lido`;
 }
 
-async function persistProgress() {
-  try { await api(`/books/${state.currentBook.id}/progress`, { method: 'PUT', body: JSON.stringify({ location: state.reader.location, percent: state.reader.percent }) }); }
-  catch (error) { toast(`Progresso não salvo: ${error.message}`, true); }
+function scheduleProgressSave(immediate = false) {
+  if (!state.currentBook || $('#reader').classList.contains('hidden')) return;
+  clearTimeout(state.progressSaveTimer);
+  state.progressSaveTimer = setTimeout(persistProgress, immediate ? 0 : 700);
+}
+
+/** Captura livro/posicao agora e serializa as gravacoes, inclusive ao fechar. */
+function persistProgress() {
+  clearTimeout(state.progressSaveTimer);
+  state.progressSaveTimer = null;
+  if (!state.currentBook) return Promise.resolve();
+  const bookId = state.currentBook.id;
+  const body = JSON.stringify({ location: state.reader.location, percent: state.reader.percent });
+  state.progressSaveChain = state.progressSaveChain.then(() =>
+    api(`/books/${bookId}/progress`, { method: 'PUT', body, keepalive: true })
+  ).catch(error => { toast(`Progresso não salvo: ${error.message}`, true); });
+  return state.progressSaveChain;
+}
+
+function flushProgressOnPageExit() {
+  if (!state.currentBook || $('#reader').classList.contains('hidden')) return;
+  persistProgress();
 }
 
 async function loadNotes() {
@@ -393,9 +413,11 @@ function locationLabel(location = {}) {
   return `${Math.round(location.percent || 0)}%`;
 }
 
-function closeReader() {
-  persistProgress(); $('#reader').classList.add('hidden'); $('#notes-panel').classList.remove('open'); document.body.style.overflow = '';
-  Promise.all([loadBooks($('#search').value), loadReadingDesk()]);
+async function closeReader() {
+  clearTimeout(state.progressSaveTimer);
+  await persistProgress();
+  $('#reader').classList.add('hidden'); $('#notes-panel').classList.remove('open'); document.body.style.overflow = '';
+  await Promise.all([loadBooks($('#search').value), loadReadingDesk()]);
 }
 
 async function loadSettings() {
@@ -606,6 +628,7 @@ async function scanLibrary() {
 function renderScanStatus(status) {
   const panel = $('#scan-progress'), button = $('#scan-button');
   const labels = {
+    restoring: 'Restaurando backup…',
     discovering: 'Localizando arquivos compatíveis…', indexing: 'Indexando sua biblioteca',
     synchronizing: 'Organizando a estante…', covers: 'Gerando capas locais…', completed: status.profile === 'low_priority' ? 'Capas concluídas' : 'Varredura concluída', failed: 'A tarefa encontrou um problema',
   };
@@ -694,4 +717,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#generate-covers').onclick = generateCovers; $('#opds-import-form').onsubmit = importOpds;
   $('#reader-close').onclick = closeReader; $('#notes-toggle').onclick = () => $('#notes-panel').classList.toggle('open'); $('#notes-close').onclick = () => $('#notes-panel').classList.remove('open');
   $('#note-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const content = new FormData(form).get('content'); try { await api(`/books/${state.currentBook.id}/notes`, { method: 'POST', body: JSON.stringify({ content, location: state.reader.location }) }); form.reset(); loadNotes(); toast('Anotação salva nesta posição.'); } catch (error) { toast(error.message, true); } };
+  window.addEventListener('pagehide', flushProgressOnPageExit);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushProgressOnPageExit(); });
 });

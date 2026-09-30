@@ -7,6 +7,7 @@ Biblioteca digital privada e offline-first para PDF, EPUB, MOBI/AZW, CBZ e livro
 - Cataloga recursivamente `pdf`, `epub`, `mobi`, `azw`, `azw3`, `cbz`, `txt`, `md`, `html`, `htm` e `fb2`.
 - Lê PDF pelo visualizador nativo do navegador; EPUB por capítulos; CBZ por páginas; MOBI/AZW clássico e texto em um leitor isolado.
 - Salva página/capítulo/percentual de leitura e anotações no SQLite.
+- As mudanças pelos controles do leitor são salvas após 700 ms e ao fechar o leitor. Ao ocultar/sair da aba, há uma tentativa adicional com `keepalive`, sem garantia em caso de encerramento abrupto ou falta de rede. PDF usa a página informada nos controles da aplicação (não acompanha o visualizador nativo); texto/MOBI usa o percentual manual.
 - Reúne automaticamente livros iniciados em **Minha mesa de leitura** e permite retirá-los dela sem apagar o arquivo.
 - Filtra por formato, autor, assunto, coleção, editora, idioma, ano, tamanho, disponibilidade e progresso; ordena por título, autor, ano, atualização, tamanho ou leitura.
 - Organiza livros em coleções coloridas editáveis, sem mover os arquivos no disco.
@@ -20,10 +21,12 @@ Biblioteca digital privada e offline-first para PDF, EPUB, MOBI/AZW, CBZ e livro
 - Permite trocar ou excluir logo, favicon e imagem de abertura, armazenados localmente.
 - Gera capas de PDF pela primeira página, sequencialmente e com baixa prioridade (`nice` + Poppler).
 - Cria e restaura pacotes ZIP do catálogo, progresso, notas, coleções, capas e identidade; os livros originais não entram no pacote.
+- Durante a restauração, os demais handlers da API aguardam sua conclusão. Se já houver varredura ou geração de capas em segundo plano, a restauração é recusada. O banco é restaurado pela API transacional de backup do SQLite, preservando a conexão. As pastas de imagens anteriores são mantidas até o commit do banco e repostas em caso de falha; erros de recuperação são registrados nos logs. Isso não garante recuperação conjunta de banco e imagens após queda do processo ou do sistema.
 - Exporta o catálogo em OPDS e importa, mediante confirmação e consentimento de rede, até 100 itens de outro catálogo.
 - Protege a API opcionalmente com HTTP Basic definido somente por variáveis de ambiente.
 - Permite editar metadados manualmente, pesquisar Open Library/Google Books e salvar a capa localmente.
 - Faz upload, download com suporte a `Range` e compartilhamento por token com validade de 7 dias e revogação.
+- Originais HTML e outros formatos ativos são entregues como download com isolamento CSP; a leitura HTML continua disponível pelo leitor dedicado. Capas só podem ser servidas de dentro da pasta configurada.
 - Não realiza chamadas externas em segundo plano. A rede para metadados começa desativada.
 
 > MOBI/AZW com DRM não é descriptografado. AZW3/KF8 pode usar recursos que o extrator textual inicial ainda não renderiza; o arquivo original sempre permanece disponível para download.
@@ -116,6 +119,8 @@ Somente o texto digitado na consulta é enviado ao provedor selecionado. O conte
 
 Para uma instalação completamente isolada, mantenha a opção desativada e, se desejado, negue acesso de saída ao container. Open Library e Google Books aparecem como fontes nativas, mas não são contatados automaticamente. Uma chave opcional do Google deve ser fornecida apenas pela variável `GOOGLE_BOOKS_API_KEY`; ela não é salva no banco.
 
+Downloads de capas e importações OPDS aceitam somente destinos públicos: os IPs do DNS e cada redirecionamento são validados e fixados na conexão, sem proxy de ambiente. Provedores de metadados configurados pelo administrador continuam podendo usar endpoints locais. Capas e feeds têm limites durante a transferência (10 MiB e 5 MiB); uploads e livros OPDS incompletos são removidos em falhas ou cancelamento, com aviso nos logs se a limpeza falhar.
+
 ## Configuração
 
 | Variável | Padrão no container | Finalidade |
@@ -150,6 +155,8 @@ Os percentuais são limites cooperativos do worker de indexação, não cotas r�
 Metadados PDF são decodificados como UTF-8, UTF-16 ou Windows-1252 e passam por uma validação de legibilidade. Valores com caracteres de substituição, controles ou aparência binária são descartados. Na varredura seguinte, títulos antigos reconhecidos como corrompidos são reparados com o nome do arquivo; títulos válidos ou editados manualmente são preservados.
 
 ## Fontes de metadados
+
+A indexação registra se já tentou extrair metadados de PDF/EPUB. Mudar do perfil econômico para equilibrado/completo extrai os dados pendentes, mesmo sem alteração do arquivo. Edições manuais e resultados externos aplicados ficam protegidos. Catálogos anteriores a esse controle preservam seus títulos/autores existentes, pois não há histórico para distinguir edições manuais. Arquivos inválidos não são reabertos repetidamente enquanto tamanho/data permanecerem iguais.
 
 As integrações nativas são Open Library e Google Books. Em **Configurações → Fontes de metadados** é possível registrar outro endpoint que implemente o formato JSON de uma dessas APIs. Isso viabiliza proxies próprios ou serviços compatíveis, inclusive uma fonte local.
 
@@ -215,6 +222,10 @@ Os links de compartilhamento criados pela interface expiram em sete dias. A API 
 - `GET /api/opds` e `POST /api/opds/import`: exporta/importa OPDS.
 
 ## Desenvolvimento
+
+Quando ferramentas locais estiverem disponíveis em `.cache/`, use `bash tests/with-local-tools.sh cargo test --locked` e `bash tests/with-local-tools.sh npm run test:browser` (também `test:ui`, `test:api` e `test:auth`). O wrapper configura os caches e artefatos dentro do projeto, sem alterar o perfil do shell. A pasta `.cache/` é ignorada pelo Git; o wrapper não instala ferramentas.
+
+Backups restaurados precisam ter o schema reconhecido, referências válidas, caminhos relativos seguros e dados de leitura válidos. A restauração preserva a pasta da biblioteca e a permissão de rede atuais; não ativa consultas externas por configuração trazida de outro servidor. Os diretórios de extração são limpos ao finalizar, falhar ou cancelar a operação (sem garantia em caso de encerramento forçado do processo).
 
 É necessário o toolchain Rust estável atual:
 

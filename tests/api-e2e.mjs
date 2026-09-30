@@ -66,6 +66,19 @@ const catalog = await request('/books?q=Sertao&availability=available&sort=title
 assert.equal(catalog.books.length, 1);
 assert.ok(catalog.facets.formats.includes('txt'));
 
+const progressPayload = { location: { type: 'percent', percent: 37 }, percent: 37 };
+await request(`/books/${catalog.books[0].id}/progress`, {
+  method: 'PUT', body: JSON.stringify(progressPayload),
+});
+const savedProgress = (await request(`/books/${catalog.books[0].id}`)).book.progress;
+assert.deepEqual(savedProgress.location, progressPayload.location);
+assert.equal(savedProgress.percent, 37);
+const invalidProgress = await fetch(`${baseUrl}/books/${catalog.books[0].id}/progress`, {
+  method: 'PUT', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ location: 'nao-e-objeto', percent: 37 }),
+});
+assert.equal(invalidProgress.status, 400);
+
 const collectionName = `Validacao E2E ${Date.now()}`;
 const { collection } = await request('/collections', {
   method: 'POST', body: JSON.stringify({ name: collectionName, color: '#52758f' }),

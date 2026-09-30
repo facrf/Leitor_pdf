@@ -8,6 +8,7 @@ mod error;
 mod metadata;
 mod models;
 mod opds;
+mod pending_file;
 mod readers;
 mod scanner;
 

@@ -44,6 +44,7 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     let auth_config = state.config.clone();
+    let maintenance_gate = Arc::new(tokio::sync::RwLock::new(()));
     Router::new()
         .route("/health", get(health))
         .route("/settings", get(get_settings).put(save_settings))
@@ -119,12 +120,29 @@ pub fn router(state: AppState) -> Router {
         .route("/maintenance/covers", post(start_cover_generation))
         .route("/opds", get(opds_catalog))
         .route("/opds/import", post(import_opds))
+        .layer(middleware::from_fn_with_state(maintenance_gate, coordinate_restore))
         .layer(middleware::from_fn(enforce_same_origin))
         .layer(middleware::from_fn_with_state(
             auth_config,
             auth::require_auth,
         ))
         .with_state(state)
+}
+
+/// Espera as operacoes HTTP em curso antes de restaurar e impede que novos
+/// handlers observem banco e assets em etapas diferentes da troca.
+async fn coordinate_restore(
+    State(gate): State<Arc<tokio::sync::RwLock<()>>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if request.method() == Method::POST && request.uri().path() == "/maintenance/restore" {
+        let _exclusive = gate.write().await;
+        next.run(request).await
+    } else {
+        let _shared = gate.read().await;
+        next.run(request).await
+    }
 }
 
 /// Impede que uma pagina de outro site altere uma biblioteca exposta em localhost/LAN.
@@ -632,11 +650,13 @@ async fn upload_book(
     }
     let root = library_root(&state).await?;
     let destination = unique_destination(&root, &filename).await?;
+    let mut cleanup = crate::pending_file::PendingFile::default();
     let mut output = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&destination)
         .await?;
+    cleanup.track(destination.clone());
     let mut written = 0_u64;
     while let Some(chunk) = field
         .chunk()
@@ -645,17 +665,12 @@ async fn upload_book(
     {
         written += chunk.len() as u64;
         if written > 1024 * 1024 * 1024 {
-            drop(output);
-            let _ = tokio::fs::remove_file(&destination).await;
             return Err(AppError::BadRequest("o arquivo excede 1 GiB".into()));
         }
-        if let Err(error) = output.write_all(&chunk).await {
-            drop(output);
-            let _ = tokio::fs::remove_file(&destination).await;
-            return Err(error.into());
-        }
+        output.write_all(&chunk).await?;
     }
     output.flush().await?;
+    cleanup.commit();
     let saved_as = destination
         .file_name()
         .and_then(|name| name.to_str())
@@ -813,11 +828,19 @@ async fn book_cover(
     AxumPath(id): AxumPath<i64>,
 ) -> AppResult<Response> {
     let filename = state.db.cover_filename(id).await?;
-    let path = state.config.covers_dir.join(filename);
-    if !path.is_file() {
+    let path = confined_asset_path(&state.config.covers_dir, &filename).await?;
+    stream_file(path, "cover", false, &HeaderMap::new()).await
+}
+
+/// Resolve um nome simples e rejeita links que apontem para fora das capas.
+async fn confined_asset_path(root: &Path, filename: &str) -> AppResult<PathBuf> {
+    let candidate = safe_branding_path(root, filename).ok_or(AppError::NotFound)?;
+    let root = tokio::fs::canonicalize(root).await?;
+    let candidate = tokio::fs::canonicalize(candidate).await?;
+    if !candidate.starts_with(&root) || !tokio::fs::metadata(&candidate).await?.is_file() {
         return Err(AppError::NotFound);
     }
-    stream_file(path, "cover", false, &HeaderMap::new()).await
+    Ok(candidate)
 }
 
 #[derive(Deserialize)]
@@ -989,20 +1012,34 @@ async fn delete_backup(
     }
 }
 
+/// Reserva o mesmo estado usado por scans/capas e libera em qualquer saida.
+struct RestoreReservation(Arc<Mutex<ScanStatus>>);
+
+impl RestoreReservation {
+    fn acquire(state: &AppState) -> AppResult<Self> {
+        let mut status = state.scan_status.lock()
+            .map_err(|_| AppError::Internal("estado da tarefa indisponivel".into()))?;
+        if status.running {
+            return Err(AppError::BadRequest("aguarde a tarefa atual terminar antes de restaurar".into()));
+        }
+        *status = ScanStatus::idle();
+        status.running = true;
+        status.phase = "restoring".into();
+        Ok(Self(state.scan_status.clone()))
+    }
+}
+
+impl Drop for RestoreReservation {
+    fn drop(&mut self) {
+        if let Ok(mut status) = self.0.lock() { *status = ScanStatus::idle(); }
+    }
+}
+
 async fn restore_backup(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> AppResult<Json<Value>> {
-    if state
-        .scan_status
-        .lock()
-        .map_err(|_| AppError::Internal("estado da varredura indisponivel".into()))?
-        .running
-    {
-        return Err(AppError::BadRequest(
-            "aguarde a tarefa atual terminar antes de restaurar".into(),
-        ));
-    }
+    let _reservation = RestoreReservation::acquire(&state)?;
     let Some(mut field) = multipart
         .next_field()
         .await
@@ -1016,11 +1053,13 @@ async fn restore_backup(
         Utc::now().timestamp_millis(),
         rand::thread_rng().gen_range(1000_u16..9999_u16)
     ));
+    let mut cleanup = crate::pending_file::PendingFile::default();
     let mut output = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&upload)
         .await?;
+    cleanup.track(upload.clone());
     let mut written = 0_u64;
     while let Some(chunk) = field
         .chunk()
@@ -1029,8 +1068,6 @@ async fn restore_backup(
     {
         written += chunk.len() as u64;
         if written > 2 * 1024 * 1024 * 1024 {
-            drop(output);
-            let _ = tokio::fs::remove_file(&upload).await;
             return Err(AppError::BadRequest("backup excede 2 GiB".into()));
         }
         output.write_all(&chunk).await?;
@@ -1039,16 +1076,16 @@ async fn restore_backup(
     drop(output);
 
     let package_result = backup::unpack(upload.clone(), &state.config).await;
-    let _ = tokio::fs::remove_file(&upload).await;
+    drop(cleanup);
     let package = package_result?;
     let automatic = backup::create(&state.db, &state.config).await?;
     let restore_result = async {
+        let assets = backup::AssetRestore::install(&package, &state.config)?;
         state.db.replace_from(&package.database).await?;
-        backup::copy_restored_assets(&package, &state.config).await?;
+        assets.commit();
         Ok::<(), AppError>(())
     }
     .await;
-    let _ = tokio::fs::remove_dir_all(&package.root).await;
     restore_result?;
     Ok(Json(json!({
         "restored": true,
@@ -1441,7 +1478,16 @@ async fn stream_file(
         );
     }
     let safe_filename = filename.replace(['"', '\r', '\n'], "_");
-    let disposition = if download { "attachment" } else { "inline" };
+    // Somente formatos passivos conhecidos podem ser abertos na origem do app.
+    let inline_safe = matches!(mime.as_str(),
+        "application/pdf" | "image/png" | "image/jpeg" | "image/gif" |
+        "image/webp" | "image/x-icon" | "image/vnd.microsoft.icon" | "text/plain"
+    );
+    let disposition = if download || !inline_safe { "attachment" } else { "inline" };
+    response.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    if !inline_safe {
+        add_sandbox_headers(response.headers_mut());
+    }
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!("{disposition}; filename=\"{safe_filename}\""))
@@ -1490,6 +1536,31 @@ fn optional_join(values: Vec<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn active_originals_are_downloaded_and_sandboxed() {
+        let root = PathBuf::from(format!(".test-stream-{}", rand::random::<u64>()));
+        tokio::fs::create_dir(&root).await.unwrap();
+        let path = root.join("book.html");
+        tokio::fs::write(&path, b"<script>alert(1)</script>").await.unwrap();
+        for headers in [HeaderMap::new(), {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-4"));
+            headers
+        }] {
+            let response = stream_file(path.clone(), "book.html", false, &headers).await.unwrap();
+            assert!(response.headers()[header::CONTENT_DISPOSITION].to_str().unwrap().starts_with("attachment;"));
+            assert_eq!(response.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+            assert!(response.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("script-src 'none'"));
+        }
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cover_paths_reject_traversal() {
+        assert!(confined_asset_path(Path::new("unused"), "../secret.txt").await.is_err());
+        assert!(confined_asset_path(Path::new("unused"), "/secret.txt").await.is_err());
+    }
 
     #[test]
     fn parses_http_ranges() {

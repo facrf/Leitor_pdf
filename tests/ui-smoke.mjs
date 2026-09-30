@@ -28,5 +28,7 @@ assert.match(css, /prefers-reduced-motion/);
 assert.match(javascript, /status\.unchanged/);
 assert.match(javascript, /\/maintenance\/backups/);
 assert.match(javascript, /\/opds\/import/);
+assert.match(javascript, /scheduleProgressSave/);
+assert.match(javascript, /pagehide/);
 
 console.log(`Contrato visual aprovado: ${requiredIds.length} controles, IDs unicos e layouts responsivos.`);
