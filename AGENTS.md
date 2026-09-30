@@ -60,3 +60,13 @@ Este documento estabelece as regras de escopo, segurança, boas práticas e limi
 - Ao retomar uma tarefa, leia `CONTINUAR.md` (se existir) e confira `git status`/`git diff` antes de editar.
 - Antes de encerrar trabalho incompleto, atualize `CONTINUAR.md` com mudanças realizadas, testes realmente executados, limitações e próximo passo concreto.
 - Não registre segredos ou conteúdo privado do acervo; não marque itens pendentes como concluídos. O checkpoint não substitui a verificação do estado atual do código.
+
+## 7. Contratos de paginação e validação
+
+- Catálogo e OPDS retornam páginas (`limit` padrão 60, máximo 200; `offset` padrão 0).
+  Preserve o total filtrado, desempate por ID e o link OPDS `next` ao alterar essas rotas.
+- Use a validação compartilhada de posições em notas, progresso e restauração.
+- Testes Rust de regressão ficam em `tests/rust/`, incluídos pelos módulos internos;
+  o Docker precisa copiar essa pasta antes de executar `cargo test`.
+- A autenticação exige ambas as credenciais ou ambas vazias. Geração de capas respeita
+  `COVER_TIMEOUT_SECONDS` (1–600, padrão 60) e encerra o renderizador ao exceder o prazo.

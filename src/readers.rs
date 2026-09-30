@@ -288,13 +288,38 @@ fn validate_archive_path(path: &str) -> AppResult<()> {
 
 fn normalize_archive_join(base: &Path, href: &str) -> AppResult<String> {
     let href = href.split('#').next().unwrap_or(href);
+    // Hrefs sao URIs, enquanto nomes no ZIP sao caminhos decodificados.
+    let mut bytes = Vec::with_capacity(href.len());
+    let mut remaining = href.as_bytes();
+    while let Some((&first, rest)) = remaining.split_first() {
+        if first == b'%' {
+            let hex = remaining.get(1..3)
+                .ok_or_else(|| AppError::BadRequest("escape EPUB incompleto".into()))?;
+            let hex = std::str::from_utf8(hex)
+                .map_err(|_| AppError::BadRequest("escape EPUB invalido".into()))?;
+            let byte = u8::from_str_radix(hex, 16)
+                .map_err(|_| AppError::BadRequest("escape EPUB invalido".into()))?;
+            bytes.push(byte);
+            remaining = &remaining[3..];
+        } else {
+            bytes.push(first);
+            remaining = rest;
+        }
+    }
+    let href = String::from_utf8(bytes)
+        .map_err(|_| AppError::BadRequest("caminho EPUB nao e UTF-8".into()))?;
+    if href.contains(['\\', '\0']) {
+        return Err(AppError::BadRequest("caminho EPUB inseguro".into()));
+    }
     let mut result = PathBuf::new();
-    for part in base.join(href).components() {
+    for part in base.join(&href).components() {
         match part {
             Component::Normal(value) => result.push(value),
             Component::CurDir => {}
             Component::ParentDir => {
-                result.pop();
+                if !result.pop() {
+                    return Err(AppError::BadRequest("caminho EPUB fora do arquivo".into()));
+                }
             }
             _ => return Err(AppError::BadRequest("caminho EPUB inseguro".into())),
         }
@@ -413,3 +438,7 @@ mod tests {
         assert!(validate_archive_path("OPS/chapter.xhtml").is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/rust/epub-regression.rs"]
+mod regression_tests;

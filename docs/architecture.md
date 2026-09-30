@@ -102,3 +102,21 @@ Downloads públicos de capas/OPDS validam DNS e cada redirecionamento, fixam IPs
 O `Dockerfile` possui duas etapas: compilação Rust e imagem final Debian com certificados e `poppler-utils`. O `compose.yaml` monta `./pdf` em `/pdf` e `./data` em `/data`, expondo somente a porta 20000. Capas, identidade e backups ficam sob `/data`, todos configuráveis por ambiente.
 
 `AUTH_USERNAME` e `AUTH_PASSWORD` ativam HTTP Basic no middleware da API. Saúde e downloads por token ficam fora dessa barreira deliberadamente. Não há contas, sessões ou múltiplos perfis; para instalações fora do computador local, use VPN ou proxy reverso com TLS.
+
+## Robustez de leitores e catálogo
+
+O catálogo retorna páginas de até 200 livros (60 por padrão), total filtrado e deslocamento.
+O banco calcula contagem e página sob o mesmo mutex; empates de ordenação usam o ID.
+A interface descarta respostas antigas de busca e oferece navegação entre páginas.
+O feed OPDS conserva os filtros no link `next`.
+
+Posições de notas, progresso e restauração usam `models::validate_location`.
+Rótulos de posição são escapados na interface, inclusive para dados legados.
+Hrefs EPUB são decodificados antes de normalizar o caminho interno, recusando
+travessia acima da raiz, escapes inválidos e separadores inseguros.
+A CSP dos leitores permite CSS inline/local no sandbox e bloqueia scripts e conexões.
+
+Aplicação de metadados prepara uma capa com nome único e proteção `PendingFile`;
+um UPDATE grava os campos e a referência juntos. Imagens antigas são conservadas.
+O renderizador PDF usa prazo configurável, mata e aguarda o processo no timeout,
+e `kill_on_drop` em cancelamento. Configuração de autenticação incompleta é recusada.

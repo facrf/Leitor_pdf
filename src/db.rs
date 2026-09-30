@@ -11,8 +11,8 @@ use tokio::sync::Mutex;
 use crate::{
     error::{AppError, AppResult},
     models::{
-        Book, BookSummary, CatalogFacets, CatalogQuery, Collection, DuplicateBook, DuplicateGroup,
-        HealthIssue, LibraryHealth, Note, Provider, ReadingProgress, SaveCollection, SaveNote,
+        validate_location, Book, BookSummary, CatalogFacets, CatalogPage, CatalogQuery, Collection,
+        DuplicateBook, DuplicateGroup, HealthIssue, LibraryHealth, Note, Provider, ReadingProgress, SaveCollection, SaveNote,
         SaveProgress, SaveProvider, Share, UpdateBook,
     },
     scanner::{metadata_looks_corrupt, sanitize_metadata_text, KnownBook, ScannedBook},
@@ -204,7 +204,13 @@ impl Database {
         Ok(())
     }
 
-    pub async fn list_books(&self, query: &CatalogQuery) -> AppResult<Vec<BookSummary>> {
+    /// Retorna uma pagina e seu total filtrado, com limite de 1 a 200 livros.
+    pub async fn list_books(&self, query: &CatalogQuery) -> AppResult<CatalogPage> {
+        let limit = query.limit.unwrap_or(60);
+        if !(1..=200).contains(&limit) {
+            return Err(AppError::BadRequest("limit deve ficar entre 1 e 200".into()));
+        }
+        let offset = query.offset.unwrap_or(0);
         let conn = self.connection.lock().await;
         let search = format!("%{}%", query.q.as_deref().unwrap_or_default().trim());
         let format = query.format.as_deref().unwrap_or_default().trim();
@@ -223,11 +229,7 @@ impl Database {
             Some("progress") => "COALESCE(p.percent, 0) DESC, b.title COLLATE NOCASE",
             _ => "b.title COLLATE NOCASE",
         };
-        let sql = format!(
-            "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
-                    b.publisher, b.published_date, b.language, b.size, b.is_available,
-                    b.cover_filename IS NOT NULL, COALESCE(p.percent, 0), b.updated_at
-             FROM books b LEFT JOIN reading_progress p ON p.book_id = b.id
+        let filter_sql = "FROM books b LEFT JOIN reading_progress p ON p.book_id = b.id
              WHERE (?1 = '%%' OR b.title LIKE ?1 OR COALESCE(b.author, '') LIKE ?1
                     OR b.filename LIKE ?1 OR b.subjects LIKE ?1)
                AND (?2 = '' OR b.format = ?2)
@@ -248,28 +250,37 @@ impl Database {
                AND (?12 IS NULL OR EXISTS (
                     SELECT 1 FROM collection_books cb
                     WHERE cb.book_id = b.id AND cb.collection_id = ?12
-               ))
-             ORDER BY {order}"
+               ))";
+        let sql = format!(
+            "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
+                    b.publisher, b.published_date, b.language, b.size, b.is_available,
+                    b.cover_filename IS NOT NULL, COALESCE(p.percent, 0), b.updated_at
+             {filter_sql} ORDER BY {order}, b.id"
         );
-        let mut stmt = conn.prepare(&sql)?;
+        let parameters = params![
+            search, format, author, subject, publisher, language, year,
+            query.min_size, query.max_size, progress, availability, query.collection_id,
+        ];
+        let total = conn.query_row(
+            &format!("SELECT COUNT(*) {filter_sql}"),
+            parameters,
+            |row| row.get(0),
+        )?;
+        let mut stmt = conn.prepare(&format!("{sql} LIMIT ?13 OFFSET ?14"))?;
         let rows = stmt.query_map(
             params![
-                search,
-                format,
-                author,
-                subject,
-                publisher,
-                language,
-                year,
-                query.min_size,
-                query.max_size,
-                progress,
-                availability,
-                query.collection_id,
+                search, format, author, subject, publisher, language, year,
+                query.min_size, query.max_size, progress, availability, query.collection_id,
+                limit, offset,
             ],
             row_to_summary,
         )?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        Ok(CatalogPage {
+            books: rows.collect::<Result<Vec<_>, _>>()?,
+            total,
+            limit,
+            offset,
+        })
     }
 
     pub async fn reading_desk(&self) -> AppResult<Vec<BookSummary>> {
@@ -593,6 +604,17 @@ impl Database {
     }
 
     pub async fn update_book(&self, id: i64, update: &UpdateBook) -> AppResult<()> {
+        self.update_book_with_cover(id, update, None).await
+    }
+
+    /// Grava metadados e a referencia da capa em uma unica instrucao SQLite.
+    /// None conserva a capa existente; o arquivo novo deve estar pronto antes.
+    pub async fn update_book_with_cover(
+        &self,
+        id: i64,
+        update: &UpdateBook,
+        cover: Option<&str>,
+    ) -> AppResult<()> {
         let title = sanitize_metadata_text(&update.title).ok_or_else(|| {
             AppError::BadRequest(
                 "informe um titulo legivel; caracteres invalidos foram recusados".into(),
@@ -602,7 +624,7 @@ impl Database {
         let changed = conn.execute(
             "UPDATE books SET title=?2, author=?3, description=?4, publisher=?5,
              published_date=?6, isbn=?7, language=?8, subjects=?9, updated_at=?10,
-             metadata_edited=1 WHERE id=?1",
+             metadata_edited=1, cover_filename=COALESCE(?11, cover_filename) WHERE id=?1",
             params![
                 id,
                 title,
@@ -614,6 +636,7 @@ impl Database {
                 clean(&update.language),
                 serde_json::to_string(&update.subjects).unwrap_or_else(|_| "[]".into()),
                 Utc::now().to_rfc3339(),
+                cover,
             ],
         )?;
         if changed == 0 {
@@ -637,17 +660,8 @@ impl Database {
                 "o progresso deve estar entre 0 e 100".into(),
             ));
         }
-        if !progress.location.is_object() {
-            return Err(AppError::BadRequest(
-                "a posicao de leitura deve ser um objeto".into(),
-            ));
-        }
+        validate_location(&progress.location)?;
         let location = progress.location.to_string();
-        if location.len() > 8 * 1024 {
-            return Err(AppError::BadRequest(
-                "a posicao de leitura excede o limite de 8 KiB".into(),
-            ));
-        }
         let conn = self.connection.lock().await;
         conn.execute(
             "INSERT INTO reading_progress (book_id, location, percent, updated_at) VALUES (?1, ?2, ?3, ?4)
@@ -675,6 +689,7 @@ impl Database {
     }
 
     pub async fn create_note(&self, book_id: i64, note: &SaveNote) -> AppResult<Note> {
+        validate_location(&note.location)?;
         if note.content.trim().is_empty() {
             return Err(AppError::BadRequest(
                 "a anotacao nao pode ficar vazia".into(),
@@ -1137,16 +1152,7 @@ fn validate_restore_data(candidate: &Connection) -> AppResult<()> {
             let value = value?;
             let location: serde_json::Value = serde_json::from_str(&value)
                 .map_err(|_| AppError::BadRequest("posicao invalida no backup".into()))?;
-            if value.len() > 8192 || !location.is_object() {
-                return Err(AppError::BadRequest("posicao invalida no backup".into()));
-            }
-            for key in ["page", "page_index", "chapter", "percent"] {
-                if let Some(number) = location.get(key) {
-                    if number.as_f64().is_none_or(|value| !value.is_finite() || value < 0.0) {
-                        return Err(AppError::BadRequest("posicao numerica invalida no backup".into()));
-                    }
-                }
-            }
+            validate_location(&location)?;
         }
     }
     let invalid: bool = candidate.query_row("SELECT EXISTS(SELECT 1 FROM reading_progress WHERE percent IS NULL OR typeof(percent) NOT IN ('integer','real') OR percent < 0 OR percent > 100)", [], |row| row.get(0))?;
@@ -1206,7 +1212,7 @@ mod restore_tests {
         assert!(!books[0].unchanged);
         assert!(books[0].metadata_scanned);
         db.sync_scan(&books).await.unwrap();
-        let book = db.list_books(&CatalogQuery::default()).await.unwrap().remove(0);
+        let book = db.list_books(&CatalogQuery::default()).await.unwrap().books.remove(0);
         assert_eq!(book.title, "Embedded title");
         assert_eq!(book.author.as_deref(), Some("Embedded author"));
         let edit: UpdateBook = serde_json::from_value(serde_json::json!({"title": "Manual title", "author": "Manual author"})).unwrap();
@@ -1246,3 +1252,7 @@ mod restore_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/rust/catalog-regression.rs"]
+mod regression_tests;

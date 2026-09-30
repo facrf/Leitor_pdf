@@ -1,4 +1,5 @@
 const state = {
+  catalog: { total: 0, limit: 60, offset: 0, requestId: 0 },
   books: [], facets: { formats: [], authors: [], subjects: [] }, desk: [], suggestions: [],
   settings: null, providers: [], collections: [], bookCollectionIds: [], currentBook: null,
   filters: { q: '', format: '', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '' },
@@ -51,22 +52,36 @@ function coverMarkup(book, detail = false) {
   return `<div class="book-cover ${book.is_available === false ? 'unavailable' : ''}">${image}${detail ? '' : `<b class="format-badge">${escapeHtml(book.format)}</b>`}</div>`;
 }
 
-async function loadBooks(query = state.filters.q) {
+async function loadBooks(query = state.filters.q, offset = 0) {
+  const requestId = ++state.catalog.requestId;
   state.filters.q = query || '';
   try {
     const params = new URLSearchParams();
     Object.entries(state.filters).forEach(([key, value]) => { if (value) params.set(key === 'q' ? 'q' : key, value); });
+    params.set('limit', state.catalog.limit);
+    params.set('offset', offset);
     const data = await api(`/books?${params}`);
+    if (requestId !== state.catalog.requestId) return;
+    // Exclusoes/filtros podem tornar a pagina atual vazia.
+    if (!data.books.length && data.total && offset > 0) {
+      return loadBooks(query, Math.floor((data.total - 1) / data.limit) * data.limit);
+    }
+    Object.assign(state.catalog, { total: data.total, limit: data.limit, offset: data.offset });
     state.books = data.books;
     state.facets = data.facets;
     renderFilters();
     renderBooks();
-  } catch (error) { toast(error.message, true); }
+  } catch (error) { if (requestId === state.catalog.requestId) toast(error.message, true); }
 }
 
 function renderBooks() {
   const grid = $('#book-grid');
-  $('#library-summary').textContent = `${state.books.length} ${state.books.length === 1 ? 'livro encontrado' : 'livros encontrados'}`;
+  const { total, limit, offset } = state.catalog;
+  $('#library-summary').textContent = `${total} ${total === 1 ? 'livro encontrado' : 'livros encontrados'}`;
+  $('#catalog-pagination').classList.toggle('hidden', total <= limit);
+  $('#catalog-page-label').textContent = total ? `${offset + 1}–${offset + state.books.length} de ${total}` : '0 livros';
+  $('#catalog-previous').disabled = offset === 0;
+  $('#catalog-next').disabled = offset + limit >= total;
   $('#empty-state').classList.toggle('hidden', state.books.length !== 0);
   grid.classList.toggle('hidden', state.books.length === 0);
   const filtered = Object.values(state.filters).some(Boolean);
@@ -402,12 +417,13 @@ function flushProgressOnPageExit() {
 async function loadNotes() {
   try {
     const { notes } = await api(`/books/${state.currentBook.id}/notes`);
-    $('#notes-list').innerHTML = notes.length ? notes.map(note => `<article class="note"><p>${escapeHtml(note.content)}</p><footer><span>${locationLabel(note.location)} · ${new Date(note.updated_at).toLocaleDateString()}</span><button data-note-delete="${note.id}">Excluir</button></footer></article>`).join('') : '<p class="detail-description">As anotações feitas durante a leitura aparecerão aqui.</p>';
+    $('#notes-list').innerHTML = notes.length ? notes.map(note => `<article class="note"><p>${escapeHtml(note.content)}</p><footer><span>${escapeHtml(locationLabel(note.location))} · ${new Date(note.updated_at).toLocaleDateString()}</span><button data-note-delete="${note.id}">Excluir</button></footer></article>`).join('') : '<p class="detail-description">As anotações feitas durante a leitura aparecerão aqui.</p>';
     $$('[data-note-delete]').forEach(button => button.onclick = async () => { await api(`/notes/${button.dataset.noteDelete}`, { method: 'DELETE' }); loadNotes(); });
   } catch (error) { toast(error.message, true); }
 }
 
 function locationLabel(location = {}) {
+  location ||= {};
   if (location.type === 'chapter') return `Capítulo ${Number(location.chapter) + 1}`;
   if (location.type === 'page') return `Página ${location.page}`;
   return `${Math.round(location.percent || 0)}%`;
@@ -703,6 +719,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   [['#filter-min-size','min_size'], ['#filter-max-size','max_size']].forEach(([selector, key]) => { $(selector).onchange = event => { state.filters[key] = event.target.value ? String(Math.round(Number(event.target.value) * 1024 * 1024)) : ''; loadBooks(); }; });
   $('#clear-filters').onclick = () => { state.filters = { q: '', format: '', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '' }; $('#search').value = ''; loadBooks(''); };
   $$('.view-switch button').forEach(button => button.onclick = () => { $$('.view-switch button').forEach(item => item.classList.remove('active')); button.classList.add('active'); $('#book-grid').classList.toggle('list', button.dataset.view === 'list'); });
+  $('#catalog-previous').onclick = () => loadBooks(state.filters.q, Math.max(0, state.catalog.offset - state.catalog.limit));
+  $('#catalog-next').onclick = () => loadBooks(state.filters.q, state.catalog.offset + state.catalog.limit);
   $('#scan-button').onclick = scanLibrary; $('#empty-scan').onclick = scanLibrary;
   $('#upload-button').onclick = $('#empty-upload').onclick = () => $('#upload-input').click(); $('#upload-input').onchange = event => upload(event.target.files[0]);
   $('#settings-button').onclick = async () => { $('#settings-dialog').showModal(); await Promise.all([loadSettings(), loadMaintenance()]); };

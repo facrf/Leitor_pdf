@@ -64,7 +64,7 @@ As fases são `idle`, `discovering`, `indexing`, `synchronizing`, `covers`, `com
 | Método e rota | Finalidade |
 |---|---|
 | `POST /upload` | Envia `multipart/form-data` com o campo `file`; limite de 1 GiB. |
-| `GET /books?...` | Pesquisa, filtra e ordena o catálogo; retorna `books` e `facets`. |
+| `GET /books?...` | Pesquisa, filtra e ordena o catálogo; retorna `books`, `facets`, `total`, `limit` e `offset`. |
 | `GET /reading-desk` | Lista livros com progresso maior que 0 e menor que 100. |
 | `GET /suggestions` | Retorna até 10 livros disponíveis em ordem aleatória. |
 | `GET /books/{id}` | Retorna dados completos e progresso do livro. |
@@ -85,6 +85,7 @@ Parâmetros de `GET /books`:
 | `progress` | `unread`, `reading` ou `finished` |
 | `availability` | `available` ou `missing` |
 | `collection_id` | ID numérico da coleção |
+| `limit`, `offset` | Tamanho de página (1–200, padrão 60) e deslocamento inteiro sem sinal (padrão 0) |
 | `sort` | `title`, `author`, `year`, `recent`, `size` ou `progress` |
 
 Exclusão exige JSON `{ "filename": "nome-exato.pdf" }`. O servidor compara com a entrada catalogada, resolve novamente o caminho dentro da raiz e não oferece recuperação interna.
@@ -191,3 +192,24 @@ A restauração aceita no máximo 2 GiB, bloqueia Zip Slip e entradas inesperada
 | `POST /opds/import` | Baixa itens de um feed informado em `{ "url": "https://..." }`. |
 
 A importação exige `network_metadata_enabled=true`, feed público HTTP/HTTPS de até 5 MiB, no máximo 100 entradas e 1 GiB por arquivo. A resposta `report` contém `imported`, `skipped` e `warnings`; depois é necessário iniciar a varredura.
+
+## Validações e páginas
+
+`GET /books` retorna o total de livros que correspondem aos filtros, independentemente
+da página. A ordenação inclui o ID como desempate. Exemplo: `/books?limit=60&offset=60`.
+`GET /opds` aceita a mesma paginação e inclui um link Atom `rel="next"` com os filtros atuais.
+Paginação por deslocamento pode mudar se o catálogo for alterado entre requisições.
+
+`location` deve ser um objeto JSON de até 8 KiB. `page` é um inteiro positivo;
+`page_index` e `chapter` são inteiros não negativos, até o maior inteiro seguro do JavaScript.
+`percent`, quando presente, fica entre 0 e 100. `type` e `href`, quando presentes, são textos.
+Em notas, omitir `location` equivale a `{}`; `null`, vetores e campos numéricos inválidos são recusados.
+A restauração aceita notas antigas com posição `null`, normalizando-as para `{}`.
+
+Aplicar metadados com capa valida consentimento e baixa a imagem antes de alterar o catálogo.
+Metadados e referência da capa são gravados juntos. Uma falha anterior à gravação preserva
+os valores existentes e limpa o novo arquivo incompleto.
+
+A inicialização exige ambas as credenciais HTTP Basic ou ambas vazias.
+`COVER_TIMEOUT_SECONDS` aceita 1–600 segundos (padrão 60); ao exceder esse prazo,
+a geração registra um aviso e continua com o próximo PDF.

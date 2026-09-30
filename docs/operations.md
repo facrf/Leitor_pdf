@@ -111,3 +111,12 @@ Para uma validação realista, use uma cópia do acervo, confira a carga com `do
 6. Faça download do backup, restaure-o em uma instalação descartável e confira catálogo e progresso.
 7. Se houver acesso remoto, valide HTTPS conforme [o guia dedicado](https.md) e confirme que a porta `20000` não está pública.
 8. Mantenha a versão anterior da imagem ou seu digest anotado para rollback; o banco deve continuar acompanhado por backups próprios.
+
+## Páginas e limites de renderização
+
+A estante exibe até 60 livros por página. Os botões anterior/próxima conservam os filtros.
+Clientes API/OPDS devem seguir páginas; OPDS fornece o link `next`.
+`COVER_TIMEOUT_SECONDS` define o prazo de cada PDF (padrão 60, permitido 1 a 600).
+PDFs que excedem o prazo produzem aviso e não impedem o processamento dos seguintes.
+Preencha `AUTH_USERNAME` e `AUTH_PASSWORD` juntos ou deixe ambos vazios;
+configuração parcial impede a inicialização para evitar exposição acidental.

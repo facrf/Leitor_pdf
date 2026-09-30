@@ -333,7 +333,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let archive = root.join("invalid.zip");
         std::fs::write(&archive, b"not a ZIP").unwrap();
-        let mut config = Config::from_env();
+        let mut config = Config::from_env().unwrap();
         config.backup_dir = root.clone();
         assert!(unpack(archive, &config).await.is_err());
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
@@ -344,7 +344,7 @@ mod tests {
     fn assets_roll_back_on_drop_and_replace_on_commit() {
         let root = PathBuf::from(format!(".test-restore-{}", rand::random::<u64>()));
         std::fs::create_dir(&root).unwrap();
-        let mut config = Config::from_env();
+        let mut config = Config::from_env().unwrap();
         config.covers_dir = root.join("live-covers");
         config.branding_dir = root.join("live-branding");
         let package = RestorePackage {

@@ -45,6 +45,17 @@ pub struct CatalogQuery {
     pub availability: Option<String>,
     pub collection_id: Option<i64>,
     pub sort: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// Pagina do catalogo, com total calculado usando os mesmos filtros.
+#[derive(Debug, Serialize)]
+pub struct CatalogPage {
+    pub books: Vec<BookSummary>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,7 +175,7 @@ pub struct Note {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SaveNote {
-    #[serde(default)]
+    #[serde(default = "empty_location")]
     pub location: serde_json::Value,
     pub content: String,
 }
@@ -222,3 +233,45 @@ pub struct Share {
 pub struct CreateShare {
     pub expires_in_hours: Option<u32>,
 }
+
+/// Posicao vazia para anotacoes sem marcador de leitura.
+fn empty_location() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+/// Valida o formato compartilhado por progresso, notas e backups.
+/// Campos de pagina/capitulo sao inteiros; percentual fica entre 0 e 100.
+pub fn validate_location(location: &serde_json::Value) -> crate::error::AppResult<()> {
+    use crate::error::AppError;
+    if !location.is_object() || location.to_string().len() > 8192 {
+        return Err(AppError::BadRequest(
+            "a posicao deve ser um objeto de ate 8 KiB".into(),
+        ));
+    }
+    for key in ["page", "page_index", "chapter"] {
+        if let Some(value) = location.get(key) {
+            if value.as_u64().is_none_or(|number| {
+                number > 9_007_199_254_740_991 || (key == "page" && number == 0)
+            }) {
+                return Err(AppError::BadRequest(format!("campo {key} da posicao invalido")));
+            }
+        }
+    }
+    if let Some(value) = location.get("percent") {
+        if value.as_f64().is_none_or(|number| {
+            !number.is_finite() || !(0.0..=100.0).contains(&number)
+        }) {
+            return Err(AppError::BadRequest("percentual da posicao invalido".into()));
+        }
+    }
+    if location.get("type").is_some_and(|value| !value.is_string())
+        || location.get("href").is_some_and(|value| !value.is_string())
+    {
+        return Err(AppError::BadRequest("tipo ou href da posicao invalido".into()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "../tests/rust/location-validation.rs"]
+mod regression_tests;

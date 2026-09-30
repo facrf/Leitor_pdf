@@ -382,3 +382,6 @@ button { color: inherit; }
   .asset-control label.button, .asset-control [data-branding-remove] { grid-column: auto; }
   .site-footer { align-items: flex-start; flex-direction: column; gap: 8px; }
 }
+
+.catalog-pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 32px 0; flex-wrap: wrap; }
+.catalog-pagination button:disabled { opacity: .45; cursor: default; }

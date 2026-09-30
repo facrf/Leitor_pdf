@@ -1,63 +1,76 @@
-# Checkpoint — 2026-09-10
+# Checkpoint — 2026-09-30
 
 ## Retomar
 
-Peça: **Leia AGENTS.md e CONTINUAR.md, confira o diff e continue.**
-Trabalhe apenas dentro deste projeto. Preserve as alterações existentes; não publique nem faça commit sem instrução.
+Leia AGENTS.md, confira git status/git diff e este checkpoint antes de editar.
+Trabalhe apenas neste projeto. O usuário autorizou commit e push em 2026-09-30.
+Nenhum deploy manual foi realizado.
 
 ## Estado atual
 
-A revisão, correções e validação acumuladas chegaram a um ponto verificado. Não há mais bloqueio por ausência de Rust/Node: ferramentas foram instaladas exclusivamente em .cache/, ignorada pelo Git. Nenhum commit ou deploy foi realizado.
+Concluída a implementação dos cinco problemas e das três melhorias autorizadas
+na revisão de 2026-09-30. Alterações preparadas para commit e push em main;
+confira git status e o remoto ao retomar para confirmar o envio.
 
-## Implementado
+## Implementado nesta revisão
 
-- Progresso: debounce, captura do livro/posição e fila serial de gravações; fechamento aguarda a fila; tentativa keepalive ao sair/ocultar. Backend valida objeto JSON e percentual.
-- Streaming: HTML e outros originais ativos recebem attachment/CSP; nosniff para todos. Capas validam nome e confinamento canônico.
-- Restauração: gate RwLock entre handlers HTTP e reserva de scan/capas; assets anteriores guardados e rollback por Drop; cópia transacional via rusqlite backup mantendo conexão.
-- Backup: valida integridade, schema reconhecido, referências, caminhos e dados JSON; preserva library_root e network_metadata_enabled atuais. Pacote extraído é limpo por Drop, com propriedade acompanhando o worker mesmo após cancelamento.
-- Rede: capas/OPDS validam URL, DNS e redirects, fixam IPs e desativam proxy de ambiente; corpos limitados durante a transferência. Provedores manuais preservam suporte deliberado a endpoints locais.
-- Upload: PendingFile remove arquivos incompletos criados pela própria operação; corrigida limpeza OPDS que podia apagar destino de outra requisição.
-- Scanner: metadata_scanned permite enriquecer após perfil econômico; metadata_edited protege alterações manuais/externas. Migração preserva títulos/autores legados por precaução.
-- README, docs/api.md, docs/architecture.md e AGENTS.md atualizados.
-- tests/with-local-tools.sh configura Rust, Node e caches locais. test:ui inclui teste real da fila de progresso.
+- Posições de notas, progresso e restauração usam models::validate_location:
+  objeto de até 8 KiB, campos de página/capítulo inteiros seguros, percentual 0–100.
+  Nota sem posição recebe {}; restauração conserva compatibilidade com null legado.
+- Rótulos de anotações são escapados antes de inserir HTML, inclusive para dados legados.
+- Hrefs EPUB codificados são decodificados antes de procurar as entradas ZIP;
+  escapes inválidos e travessia acima da raiz são recusados.
+- CSP de leitores permite CSS inline/local no sandbox, conservando bloqueio de scripts/conexões.
+- Aplicar metadados prepara a capa antes da gravação. Metadados e referência de capa
+  são atualizados juntos; PendingFile limpa arquivos novos em falha/cancelamento.
+  Nomes únicos evitam sobrescrever capas existentes. Imagens antigas são conservadas.
+- Catálogo e OPDS usam limit (padrão 60, máximo 200) e offset (padrão 0), com total
+  filtrado e desempate por ID. Interface navega entre páginas e descarta respostas antigas.
+  OPDS fornece link next conservando filtros. Clientes precisam percorrer páginas.
+- Renderização PDF usa COVER_TIMEOUT_SECONDS (padrão 60, permitido 1–600),
+  encerra/aguarda processo no timeout e permite continuar com o próximo arquivo.
+- Inicialização recusa autenticação parcial e usuário com dois-pontos.
+- Regressões Rust em tests/rust/, incluídas pelos módulos internos e copiadas pelo Dockerfile.
+  Suites API/navegador/autenticação ampliadas; documentação e ambiente atualizados.
 
-## Validação realmente concluída nesta sessão
+## Verificações realmente executadas
 
-Executada com ferramentas locais:
-- cargo test --locked: **19 passaram, 0 falharam, 1 ignorado** (teste de volume opt-in de 2.287 arquivos).
-- npm run test:api: **passou**, incluindo backup/restauração e progresso.
-- npm run test:auth: **passou**.
-- npm run test:browser: **1 cenário passou**, cobrindo catálogo, filtros, coleção, leitura, anotação, backup e retomada em 37% após reload.
-- npm run test:ui: **passou**, incluindo contrato visual, sintaxe e fila de gravações.
-- git diff --check: **passou**.
+Com bash tests/with-local-tools.sh:
+- cargo check --locked: passou durante a implementação.
+- cargo test --locked: 28 passaram, 0 falharam, 1 teste de volume ignorado.
+- npm run test:ui: passou (sintaxe JS, contrato visual e fila de progresso).
+- npm run test:api: passou, incluindo paginação, posições inválidas, falhas de metadados
+  sem alteração do livro e backup/restauração de nota com posição padrão.
+- npm run test:auth: passou, incluindo recusa de configuração parcial na inicialização.
+- npm run test:browser: 1 cenário passou, incluindo páginas, filtros, estilos computados
+  do leitor e escape de HTML em posição legada.
+- git diff --check: passou.
+- cargo fmt não pôde executar: rustfmt não está instalado na ferramenta local.
+  Nenhuma ferramenta foi instalada nesta revisão.
+- A imagem Docker não foi construída nesta revisão.
 
-Assinaturas/lifetimes de rusqlite backup e reqwest resolve_to_addrs agora foram confirmados pelo compilador. Não repetir alegação antiga de cargo ausente.
+## Ferramentas locais
 
-## Comandos para repetir quando necessário
+Use tests/with-local-tools.sh para Rust, Node, Playwright e temporários dentro de .cache/.
+O wrapper não instala ferramentas. Não alterar permissões de target/.
 
-Execute a partir da raiz:
-```bash
-bash tests/with-local-tools.sh cargo test --locked
-bash tests/with-local-tools.sh npm run test:ui
-bash tests/with-local-tools.sh npm run test:api
-bash tests/with-local-tools.sh npm run test:auth
-bash tests/with-local-tools.sh npm run test:browser
-```
+## Limites preservados
 
-Rust 1.98.1 em .cache/rust, Node 22.16.0 em .cache/node, Chromium/Playwright em .cache/playwright; caches temporários também locais. CARGO_TARGET_DIR aponta para .cache/rust/target, pois target/debug existente recusou escrita. Não alterar permissões de target. O wrapper não instala ferramentas.
+- PDF acompanha controles da aplicação, não a navegação interna do visualizador nativo.
+  Texto/MOBI usa percentual manual; EPUB salva capítulo e CBZ salva página.
+- Sem fila persistente offline nem coordenação entre abas; keepalive não garante entrega após crash.
+- Não há transação durável única entre SQLite e imagens nem recuperação conjunta automática
+  após crash. Pastas anteriores são preservadas até commit; mounts podem impedir renomeação.
+- Validação de backup não é auditoria de todas as constraints; schemas com índices extras são recusados.
+  Backups antigos com posições inválidas (exceto null legado de notas) continuam recusados.
+- SSRF possui validação DNS/IP/redirects, mas não testes completos de DNS rebinding.
+- Limites ZIP ainda usam tamanhos declarados. Range não satisfazível ainda pode retornar 200.
+- O teste de volume ignorado não foi executado; desempenho em acervo real não foi medido.
+- Paginação por offset pode mudar se o catálogo for alterado entre páginas.
+- Imagens antigas não têm coleta automática.
 
-## Limites conhecidos / trabalhos futuros
+## Próximo passo
 
-- PDF acompanha controles da aplicação, não a navegação interna do visualizador nativo. Texto/MOBI usa percentual manual; EPUB salva capítulo e CBZ página.
-- Sem fila persistente offline nem coordenação de progresso entre abas. keepalive não garante entrega após crash.
-- SQLite e pastas de assets não têm transação única durável: queda do processo pode exigir recuperação pelo backup preventivo. Drop registra falhas de cleanup; não protege contra kill/crash.
-- Renomear pastas de assets exige escrita no pai; mounts individuais podem impedir restauração e gerar rollback.
-- Validação de backup não é auditoria exaustiva de todas as constraints. Schemas personalizados com índices extras são recusados.
-- SSRF tem testes de classificação de IP e limites HTTP locais, mas não teste completo de DNS rebinding/redirects; não declarar segurança exaustiva.
-- O limite ZIP usa tamanho declarado das entradas; avaliar limite real de bytes extraídos em endurecimento futuro.
-- Range não satisfazível continua ignorado com 200; isso não foi tratado como correção obrigatória sem analisar requisitos HTTP.
-- A suite de volume ignorada não foi executada; desempenho de acervos grandes não foi medido.
-
-## Próxima ação
-
-Se o usuário apenas pedir status, informar que compilação e suites acima passaram. Se pedir continuar melhorias, escolher uma pendência concreta acima e adicionar regressão correspondente. Se pedir entregar/versionar, revisar diff e escopo antes de agir. Não recomeçar toda a revisão nem instalar novamente as ferramentas locais.
+Não há pendência na implementação autorizada. Commit e push foram autorizados.
+Para publicação de imagem ou deploy manual, confira as instruções do usuário e
+valide a construção da imagem antes de prosseguir.

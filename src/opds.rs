@@ -17,11 +17,15 @@ pub struct ImportReport {
     pub warnings: Vec<String>,
 }
 
-pub fn catalog_xml(books: &[BookSummary], base_url: &str) -> String {
+pub fn catalog_xml(books: &[BookSummary], base_url: &str, next: Option<&str>) -> String {
+    let base_url = escape_xml(base_url);
     let updated = chrono::Utc::now().to_rfc3339();
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<feed xmlns=\"http://www.w3.org/2005/Atom\" xmlns:opds=\"http://opds-spec.org/2010/catalog\">\n<id>urn:estante-livre:catalog</id><title>Estante Livre</title><updated>{updated}</updated><link rel=\"self\" href=\"{base_url}/api/opds\" type=\"application/atom+xml;profile=opds-catalog;kind=acquisition\"/>"
     );
+    if let Some(next) = next {
+        xml.push_str(&format!("<link rel=\"next\" href=\"{}\" type=\"application/atom+xml;profile=opds-catalog;kind=acquisition\"/>", escape_xml(next)));
+    }
     for book in books {
         let author = book.author.as_deref().unwrap_or("Autor nao informado");
         let media_type = mime_guess::from_ext(&book.format)

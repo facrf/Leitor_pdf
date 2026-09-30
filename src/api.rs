@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Multipart, OriginalUri, Path as AxumPath, Query, State},
     http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -685,9 +685,12 @@ async fn list_books(
     State(state): State<AppState>,
     Query(query): Query<CatalogQuery>,
 ) -> AppResult<Json<Value>> {
-    let books = state.db.list_books(&query).await?;
+    let page = state.db.list_books(&query).await?;
     let facets = state.db.catalog_facets().await?;
-    Ok(Json(json!({ "books": books, "facets": facets })))
+    Ok(Json(json!({
+        "books": page.books, "facets": facets, "total": page.total,
+        "limit": page.limit, "offset": page.offset
+    })))
 }
 
 async fn get_book(
@@ -1169,9 +1172,10 @@ struct OpdsImportRequest {
 async fn opds_catalog(
     State(state): State<AppState>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
     Query(query): Query<CatalogQuery>,
 ) -> AppResult<Response> {
-    let books = state.db.list_books(&query).await?;
+    let page = state.db.list_books(&query).await?;
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -1181,7 +1185,22 @@ async fn opds_catalog(
         .and_then(|value| value.to_str().ok())
         .filter(|value| matches!(*value, "http" | "https"))
         .unwrap_or("http");
-    let body = opds::catalog_xml(&books, &format!("{scheme}://{host}"));
+    let base_url = format!("{scheme}://{host}");
+    let next = if u64::from(page.offset) + u64::from(page.limit) < page.total {
+        let mut url = url::Url::parse(&format!("{base_url}{uri}"))
+            .map_err(|_| AppError::BadRequest("URL do catalogo invalida".into()))?;
+        let pairs: Vec<_> = url.query_pairs()
+            .filter(|(key, _)| key != "offset" && key != "limit")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.query_pairs_mut().clear().extend_pairs(pairs)
+            .append_pair("limit", &page.limit.to_string())
+            .append_pair("offset", &(u64::from(page.offset) + u64::from(page.limit)).to_string());
+        Some(url.to_string())
+    } else {
+        None
+    };
+    let body = opds::catalog_xml(&page.books, &base_url, next.as_deref());
     Ok((
         [(
             header::CONTENT_TYPE,
@@ -1254,19 +1273,36 @@ async fn apply_metadata(
         language: candidate.language,
         subjects: candidate.subjects,
     };
-    state.db.update_book(id, &update).await?;
-    let mut cover_saved = false;
+    // Prepare todos os recursos antes de alterar dados do catalogo.
+    state.db.book(id).await?;
+    if scanner::sanitize_metadata_text(&update.title).is_none() {
+        return Err(AppError::BadRequest("informe um titulo legivel".into()));
+    }
+    let mut cleanup = crate::pending_file::PendingFile::default();
+    let mut cover_filename = None;
     if let Some(url) = candidate.cover_url {
         if !network_enabled(&state).await? {
             return Err(AppError::NetworkDisabled);
         }
         let (bytes, extension) = metadata::download_cover(&state.http, &url).await?;
         tokio::fs::create_dir_all(&state.config.covers_dir).await?;
-        let filename = format!("book-{id}.{extension}");
-        tokio::fs::write(state.config.covers_dir.join(&filename), bytes).await?;
-        state.db.set_cover(id, &filename).await?;
-        cover_saved = true;
+        // Nomes imutaveis evitam sobrescrever a capa vigente em falhas/concorrencia.
+        let filename = format!("book-{id}-{}.{extension}", rand::random::<u64>());
+        let path = state.config.covers_dir.join(&filename);
+        let mut output = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await?;
+        cleanup.track(path);
+        output.write_all(&bytes).await?;
+        output.flush().await?;
+        drop(output);
+        cover_filename = Some(filename);
     }
+    state.db.update_book_with_cover(id, &update, cover_filename.as_deref()).await?;
+    cleanup.commit();
+    let cover_saved = cover_filename.is_some();
     Ok(Json(
         json!({ "book": state.db.book(id).await?, "cover_saved": cover_saved }),
     ))
@@ -1421,7 +1457,7 @@ fn sandboxed_html(bytes: Vec<u8>) -> Response {
 }
 
 fn add_sandbox_headers(headers: &mut HeaderMap) {
-    headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox; default-src 'self' data: blob:; script-src 'none'; connect-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'; navigate-to 'none'"));
+    headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox; default-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'none'; connect-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'; navigate-to 'none'"));
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),

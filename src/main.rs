@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let config = Config::from_env();
+    let config = Config::from_env()?;
     tokio::fs::create_dir_all(&config.covers_dir).await?;
     tokio::fs::create_dir_all(&config.branding_dir).await?;
     tokio::fs::create_dir_all(&config.backup_dir).await?;

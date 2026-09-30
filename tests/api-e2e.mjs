@@ -66,6 +66,53 @@ const catalog = await request('/books?q=Sertao&availability=available&sort=title
 assert.equal(catalog.books.length, 1);
 assert.ok(catalog.facets.formats.includes('txt'));
 
+// Paginas limitadas, totais filtrados e desempate estavel.
+const firstPage = await request('/books?limit=1');
+const secondPage = await request('/books?limit=1&offset=1');
+assert.equal(firstPage.total, 3);
+assert.equal(firstPage.limit, 1);
+assert.equal(firstPage.offset, 0);
+assert.equal(firstPage.books.length, 1);
+assert.notEqual(firstPage.books[0].id, secondPage.books[0].id);
+assert.equal((await request('/books?limit=1&offset=3')).books.length, 0);
+assert.equal((await request('/books?q=Sertao&limit=1')).total, 1);
+for (const query of ['limit=0', 'limit=201', 'offset=-1']) {
+  assert.equal((await fetch(`${baseUrl}/books?${query}`)).status, 400);
+}
+
+// Posicoes aceitas podem ser restauradas; HTML e tipos invalidos sao recusados.
+const bookId = catalog.books[0].id;
+for (const location of [[], null, { type: 'page', page: '<b>1</b>' }, { page: 1.5 }, { percent: 101 }]) {
+  for (const [endpoint, method, payload] of [
+    ['notes', 'POST', { content: 'Nota sintetica', location }],
+    ['progress', 'PUT', { percent: 37, location }],
+  ]) {
+    const response = await fetch(`${baseUrl}/books/${bookId}/${endpoint}`, {
+      method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    assert.equal(response.status, 400);
+  }
+}
+const { note } = await request(`/books/${bookId}/notes`, {
+  method: 'POST', body: JSON.stringify({ content: 'Nota sem posicao explicita' }),
+});
+assert.deepEqual(note.location, {});
+
+// Falhas antes da gravacao devem preservar todos os metadados.
+const original = (await request(`/books/${bookId}`)).book;
+const candidate = { provider: 'synthetic', title: 'Nao deve substituir o titulo', authors: [], subjects: [], cover_url: 'http://127.0.0.1/cover.jpg' };
+async function applyExpectingFailure(status) {
+  const response = await fetch(`${baseUrl}/books/${bookId}/metadata`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(candidate),
+  });
+  assert.equal(response.status, status);
+  assert.deepEqual((await request(`/books/${bookId}`)).book, original);
+}
+await applyExpectingFailure(403);
+await request('/settings', { method: 'PUT', body: JSON.stringify({ ...settings, network_metadata_enabled: true }) });
+await applyExpectingFailure(400);
+await request('/settings', { method: 'PUT', body: JSON.stringify(settings) });
+
 const progressPayload = { location: { type: 'percent', percent: 37 }, percent: 37 };
 await request(`/books/${catalog.books[0].id}/progress`, {
   method: 'PUT', body: JSON.stringify(progressPayload),
@@ -106,6 +153,11 @@ const opdsResponse = await fetch(`${baseUrl}/opds`);
 assert.equal(opdsResponse.status, 200);
 assert.match(opdsResponse.headers.get('content-type'), /application\/atom\+xml/);
 assert.match(await opdsResponse.text(), /<feed[\s>]/);
+const pagedOpds = await (await fetch(`${baseUrl}/opds?limit=1&format=txt`)).text();
+assert.equal((pagedOpds.match(/<entry>/g) || []).length, 1);
+assert.match(pagedOpds, /rel="next"/);
+assert.match(pagedOpds, /format=txt/);
+assert.match(pagedOpds, /offset=1/);
 
 const { backup } = await request('/maintenance/backups', { method: 'POST' });
 const archiveResponse = await fetch(`${baseUrl}/maintenance/backups/${encodeURIComponent(backup.filename)}`);
@@ -117,6 +169,7 @@ restoreForm.append('backup', new Blob([archive], { type: 'application/zip' }), b
 const restored = await request('/maintenance/restore', { method: 'POST', body: restoreForm });
 assert.equal(restored.restored, true);
 assert.equal(restored.original_books_unchanged, true);
+assert.deepEqual((await request(`/books/${bookId}/notes`)).notes[0].location, {});
 
 const corruptRestoreForm = new FormData();
 corruptRestoreForm.append('backup', new Blob(['isto nao e um arquivo ZIP']), 'corrompido.zip');

@@ -69,6 +69,7 @@ services:
       COVERS_DIR: /data/covers
       BRANDING_DIR: /data/branding
       BACKUP_DIR: /data/backups
+      COVER_TIMEOUT_SECONDS: ${COVER_TIMEOUT_SECONDS:-60}
       AUTH_USERNAME: ${AUTH_USERNAME:-}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-}
       GOOGLE_BOOKS_API_KEY: ${GOOGLE_BOOKS_API_KEY:-}
@@ -131,6 +132,7 @@ Downloads de capas e importações OPDS aceitam somente destinos públicos: os I
 | `COVERS_DIR` | `/data/covers` | Cache local de capas |
 | `BRANDING_DIR` | `/data/branding` | Logo, favicon e imagem de abertura locais |
 | `BACKUP_DIR` | `/data/backups` | Pacotes de backup gerados localmente |
+| `COVER_TIMEOUT_SECONDS` | `60` | Prazo por PDF para gerar capa (1 a 600 segundos) |
 | `AUTH_USERNAME` | vazio | Usuário HTTP Basic; exige também a senha |
 | `AUTH_PASSWORD` | vazio | Senha HTTP Basic; nunca é persistida no SQLite |
 | `GOOGLE_BOOKS_API_KEY` | vazio | Chave opcional, somente em memória |
@@ -250,7 +252,7 @@ Sem Docker, ajuste `LIBRARY_ROOT` e mantenha `DATABASE_PATH`/`COVERS_DIR` em cam
 
 ## Segurança de acesso
 
-O serviço continua sendo uma biblioteca de usuário único. Quando `AUTH_USERNAME` e `AUTH_PASSWORD` estão ambos preenchidos, todas as rotas da API exigem HTTP Basic, exceto saúde e links públicos por token. A interface aciona o diálogo nativo de credenciais do navegador. HTTP Basic não cifra a senha: fora da máquina local, use VPN ou proxy reverso com HTTPS e nunca publique a porta 20000 diretamente.
+O serviço continua sendo uma biblioteca de usuário único. Quando `AUTH_USERNAME` e `AUTH_PASSWORD` estão ambos preenchidos, todas as rotas da API exigem HTTP Basic, exceto saúde e links públicos por token. Definir apenas uma credencial impede a inicialização; o usuário não pode conter dois-pontos. A interface aciona o diálogo nativo de credenciais do navegador. HTTP Basic não cifra a senha: fora da máquina local, use VPN ou proxy reverso com HTTPS e nunca publique a porta 20000 diretamente.
 
 Excluir uma duplicata remove o arquivo original da pasta e não há lixeira interna; a interface exige repetir exatamente o nome. Backups administrativos não incluem os livros, portanto mantenha também uma cópia separada de `/pdf`.
 
@@ -261,3 +263,17 @@ Para acesso remoto, não exponha diretamente `20000`. Use VPN ou o exemplo docum
 Copyright © 2026 **FACRF** — [www.fabianocesar.com](https://www.fabianocesar.com).
 
 Este projeto é software livre, distribuído sob a **GNU General Public License versão 3 ou posterior** (`GPL-3.0-or-later`). Consulte [LICENSE](LICENSE). A identificação “Desenvolvido por FACRF.” aparece discretamente no rodapé da biblioteca e das configurações e direciona ao site do autor.
+
+### Revisão de robustez e paginação
+
+O catálogo e o OPDS usam `limit` (padrão 60, máximo 200) e `offset` (padrão 0).
+A interface oferece páginas anterior/próxima, conserva os filtros e mostra o total;
+o OPDS inclui `rel="next"`. Clientes da API devem percorrer as páginas para obter todo o acervo.
+Anotações e progresso validam a mesma estrutura de posição usada na restauração.
+Referências EPUB codificadas são decodificadas antes da busca no ZIP. Leitores isolados
+permitem CSS local/inline, mantendo scripts e conexões bloqueados.
+Aplicar metadados prepara a capa antes de gravar título e referência da imagem juntos;
+falhas de validação, consentimento ou download preservam os dados anteriores.
+Capas novas têm nomes únicos; capas antigas são conservadas para evitar interferência
+com downloads e backups em andamento. Não há coleta automática dessas imagens antigas.
+Cada renderização PDF tem prazo configurável e encerra o processo ao excedê-lo.
