@@ -1,4 +1,5 @@
 target
+.cache
 data
 .git
 .env

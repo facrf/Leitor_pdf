@@ -12,8 +12,8 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         validate_location, Book, BookSummary, CatalogFacets, CatalogPage, CatalogQuery, Collection,
-        DuplicateBook, DuplicateGroup, HealthIssue, LibraryHealth, Note, Provider, ReadingProgress, SaveCollection, SaveNote,
-        SaveProgress, SaveProvider, Share, UpdateBook,
+        DuplicateBook, DuplicateGroup, HealthIssue, LibraryHealth, Note, Provider, ReadingProgress,
+        SaveCollection, SaveNote, SaveProgress, SaveProvider, Share, UpdateBook,
     },
     scanner::{metadata_looks_corrupt, sanitize_metadata_text, KnownBook, ScannedBook},
 };
@@ -108,13 +108,18 @@ impl Database {
         validate_restore_data(&candidate)?;
         // Estes valores descrevem esta instalacao e seu consentimento de rede.
         for key in ["library_root", "network_metadata_enabled"] {
-            let value: String = conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| row.get(0))?;
+            let value: String =
+                conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
+                    row.get(0)
+                })?;
             candidate.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
         }
         let backup = rusqlite::backup::Backup::new(&candidate, &mut conn)?;
         match backup.step(-1)? {
             rusqlite::backup::StepResult::Done => Ok(()),
-            _ => Err(AppError::BadRequest("banco ocupado; tente restaurar novamente".into())),
+            _ => Err(AppError::BadRequest(
+                "banco ocupado; tente restaurar novamente".into(),
+            )),
         }
     }
 
@@ -208,7 +213,9 @@ impl Database {
     pub async fn list_books(&self, query: &CatalogQuery) -> AppResult<CatalogPage> {
         let limit = query.limit.unwrap_or(60);
         if !(1..=200).contains(&limit) {
-            return Err(AppError::BadRequest("limit deve ficar entre 1 e 200".into()));
+            return Err(AppError::BadRequest(
+                "limit deve ficar entre 1 e 200".into(),
+            ));
         }
         let offset = query.offset.unwrap_or(0);
         let conn = self.connection.lock().await;
@@ -258,8 +265,18 @@ impl Database {
              {filter_sql} ORDER BY {order}, b.id"
         );
         let parameters = params![
-            search, format, author, subject, publisher, language, year,
-            query.min_size, query.max_size, progress, availability, query.collection_id,
+            search,
+            format,
+            author,
+            subject,
+            publisher,
+            language,
+            year,
+            query.min_size,
+            query.max_size,
+            progress,
+            availability,
+            query.collection_id,
         ];
         let total = conn.query_row(
             &format!("SELECT COUNT(*) {filter_sql}"),
@@ -269,9 +286,20 @@ impl Database {
         let mut stmt = conn.prepare(&format!("{sql} LIMIT ?13 OFFSET ?14"))?;
         let rows = stmt.query_map(
             params![
-                search, format, author, subject, publisher, language, year,
-                query.min_size, query.max_size, progress, availability, query.collection_id,
-                limit, offset,
+                search,
+                format,
+                author,
+                subject,
+                publisher,
+                language,
+                year,
+                query.min_size,
+                query.max_size,
+                progress,
+                availability,
+                query.collection_id,
+                limit,
+                offset,
             ],
             row_to_summary,
         )?;
@@ -1087,12 +1115,18 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         connection.execute("ALTER TABLE books ADD COLUMN content_hash TEXT", [])?;
     }
     if !columns.iter().any(|column| column == "metadata_scanned") {
-        connection.execute("ALTER TABLE books ADD COLUMN metadata_scanned INTEGER NOT NULL DEFAULT 0", [])?;
+        connection.execute(
+            "ALTER TABLE books ADD COLUMN metadata_scanned INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     if !columns.iter().any(|column| column == "metadata_edited") {
         // Em catalogos antigos nao ha origem dos metadados: preserve todos.
         // O default permanece 0 para livros novos apos a migracao.
-        connection.execute("ALTER TABLE books ADD COLUMN metadata_edited INTEGER NOT NULL DEFAULT 0", [])?;
+        connection.execute(
+            "ALTER TABLE books ADD COLUMN metadata_edited INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
         connection.execute("UPDATE books SET metadata_edited=1", [])?;
     }
     connection.execute(
@@ -1107,22 +1141,45 @@ fn validate_restore_schema(candidate: &Connection) -> AppResult<()> {
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(SCHEMA)?;
     migrate(&reference)?;
-    let mut objects = candidate.prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")?;
-    for row in objects.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
+    let mut objects =
+        candidate.prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")?;
+    for row in objects.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
         let (kind, name) = row?;
-        let known: bool = reference.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2)", params![kind, name], |row| row.get(0))?;
+        let known: bool = reference.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=?1 AND name=?2)",
+            params![kind, name],
+            |row| row.get(0),
+        )?;
         if !known || !matches!(kind.as_str(), "table" | "index") {
-            return Err(AppError::BadRequest("backup contem objetos SQL nao reconhecidos".into()));
+            return Err(AppError::BadRequest(
+                "backup contem objetos SQL nao reconhecidos".into(),
+            ));
         }
     }
     let mut tables = reference.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
     for table in tables.query_map([], |row| row.get::<_, String>(0))? {
         let table = table?;
         let mut fields = reference.prepare(&format!("PRAGMA table_info({table})"))?;
-        let fields = fields.query_map([], |row| row.get::<_, String>(1))?
+        let fields = fields
+            .query_map([], |row| row.get::<_, String>(1))?
             .collect::<Result<Vec<_>, _>>()?;
-        let required: Vec<_> = fields.iter().filter(|name| !matches!(name.as_str(), "content_hash" | "metadata_scanned" | "metadata_edited")).cloned().collect();
-        candidate.prepare(&format!("SELECT {} FROM {table} LIMIT 0", required.join(",")))
+        let required: Vec<_> = fields
+            .iter()
+            .filter(|name| {
+                !matches!(
+                    name.as_str(),
+                    "content_hash" | "metadata_scanned" | "metadata_edited"
+                )
+            })
+            .cloned()
+            .collect();
+        candidate
+            .prepare(&format!(
+                "SELECT {} FROM {table} LIMIT 0",
+                required.join(",")
+            ))
             .map_err(|_| AppError::BadRequest(format!("schema incompleto na tabela {table}")))?;
     }
     Ok(())
@@ -1131,20 +1188,42 @@ fn validate_restore_schema(candidate: &Connection) -> AppResult<()> {
 /// Verifica referencias, caminhos e JSON consumidos pelo catalogo e leitores.
 fn validate_restore_data(candidate: &Connection) -> AppResult<()> {
     // SaveNote antigo aceita location omitido (JSON null).
-    candidate.execute("UPDATE notes SET location='{}' WHERE TRIM(location)='null'", [])?;
-    if candidate.prepare("PRAGMA foreign_key_check")?.query([])?.next()?.is_some() {
-        return Err(AppError::BadRequest("backup contem referencias invalidas".into()));
+    candidate.execute(
+        "UPDATE notes SET location='{}' WHERE TRIM(location)='null'",
+        [],
+    )?;
+    if candidate
+        .prepare("PRAGMA foreign_key_check")?
+        .query([])?
+        .next()?
+        .is_some()
+    {
+        return Err(AppError::BadRequest(
+            "backup contem referencias invalidas".into(),
+        ));
     }
-    let mut books = candidate.prepare("SELECT relative_path, cover_filename, subjects FROM books")?;
-    for row in books.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)))? {
+    let mut books =
+        candidate.prepare("SELECT relative_path, cover_filename, subjects FROM books")?;
+    for row in books.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })? {
         let (relative, cover, subjects) = row?;
         crate::scanner::path_to_safe_relative(Path::new(&relative))?;
         if let Some(cover) = cover {
-            if Path::new(&cover).file_name().and_then(|name| name.to_str()) != Some(cover.as_str()) || cover.contains('\\') {
-                return Err(AppError::BadRequest("caminho de capa invalido no backup".into()));
+            if Path::new(&cover).file_name().and_then(|name| name.to_str()) != Some(cover.as_str())
+                || cover.contains('\\')
+            {
+                return Err(AppError::BadRequest(
+                    "caminho de capa invalido no backup".into(),
+                ));
             }
         }
-        serde_json::from_str::<Vec<String>>(&subjects).map_err(|_| AppError::BadRequest("assuntos invalidos no backup".into()))?;
+        serde_json::from_str::<Vec<String>>(&subjects)
+            .map_err(|_| AppError::BadRequest("assuntos invalidos no backup".into()))?;
     }
     for table in ["reading_progress", "notes"] {
         let mut stmt = candidate.prepare(&format!("SELECT location FROM {table}"))?;
@@ -1156,7 +1235,9 @@ fn validate_restore_data(candidate: &Connection) -> AppResult<()> {
         }
     }
     let invalid: bool = candidate.query_row("SELECT EXISTS(SELECT 1 FROM reading_progress WHERE percent IS NULL OR typeof(percent) NOT IN ('integer','real') OR percent < 0 OR percent > 100)", [], |row| row.get(0))?;
-    if invalid { return Err(AppError::BadRequest("progresso invalido no backup".into())); }
+    if invalid {
+        return Err(AppError::BadRequest("progresso invalido no backup".into()));
+    }
     Ok(())
 }
 
@@ -1180,12 +1261,21 @@ mod restore_tests {
         migrate(&candidate).unwrap();
         validate_restore_schema(&candidate).unwrap();
         validate_restore_data(&candidate).unwrap();
-        candidate.execute_batch("CREATE TRIGGER unexpected AFTER INSERT ON settings BEGIN DELETE FROM books; END;").unwrap();
+        candidate
+            .execute_batch(
+                "CREATE TRIGGER unexpected AFTER INSERT ON settings BEGIN DELETE FROM books; END;",
+            )
+            .unwrap();
         assert!(validate_restore_schema(&candidate).is_err());
         candidate.execute_batch("DROP TRIGGER unexpected;").unwrap();
         candidate.execute("INSERT INTO books(title,filename,relative_path,format,size,modified_at,created_at,updated_at) VALUES('test','test.txt','../test.txt','txt',1,1,'now','now')", []).unwrap();
         assert!(validate_restore_data(&candidate).is_err());
-        candidate.execute("UPDATE books SET relative_path='test.txt', subjects='not JSON'", []).unwrap();
+        candidate
+            .execute(
+                "UPDATE books SET relative_path='test.txt', subjects='not JSON'",
+                [],
+            )
+            .unwrap();
         assert!(validate_restore_data(&candidate).is_err());
     }
 
@@ -1196,34 +1286,64 @@ mod restore_tests {
         let root = std::path::PathBuf::from(format!(".test-profile-{}", rand::random::<u64>()));
         std::fs::create_dir(&root).unwrap();
         {
-            let mut archive = zip::ZipWriter::new(std::fs::File::create(root.join("fallback.epub")).unwrap());
+            let mut archive =
+                zip::ZipWriter::new(std::fs::File::create(root.join("fallback.epub")).unwrap());
             let options = zip::write::SimpleFileOptions::default();
-            archive.start_file("META-INF/container.xml", options).unwrap();
-            archive.write_all(b"<container><rootfile full-path='book.opf'/></container>").unwrap();
+            archive
+                .start_file("META-INF/container.xml", options)
+                .unwrap();
+            archive
+                .write_all(b"<container><rootfile full-path='book.opf'/></container>")
+                .unwrap();
             archive.start_file("book.opf", options).unwrap();
             archive.write_all(b"<package><metadata><title>Embedded title</title><creator>Embedded author</creator></metadata></package>").unwrap();
             archive.finish().unwrap();
         }
-        let db = Database::open(&root.join("catalog.db"), &root).await.unwrap();
+        let db = Database::open(&root.join("catalog.db"), &root)
+            .await
+            .unwrap();
         let (books, _, _) = scan(&root, ScanProfile::Economical, &HashMap::new(), |_| {}).unwrap();
         assert!(!books[0].metadata_scanned);
         db.sync_scan(&books).await.unwrap();
-        let (books, _, _) = scan(&root, ScanProfile::Complete, &db.scan_index().await.unwrap(), |_| {}).unwrap();
+        let (books, _, _) = scan(
+            &root,
+            ScanProfile::Complete,
+            &db.scan_index().await.unwrap(),
+            |_| {},
+        )
+        .unwrap();
         assert!(!books[0].unchanged);
         assert!(books[0].metadata_scanned);
         db.sync_scan(&books).await.unwrap();
-        let book = db.list_books(&CatalogQuery::default()).await.unwrap().books.remove(0);
+        let book = db
+            .list_books(&CatalogQuery::default())
+            .await
+            .unwrap()
+            .books
+            .remove(0);
         assert_eq!(book.title, "Embedded title");
         assert_eq!(book.author.as_deref(), Some("Embedded author"));
-        let edit: UpdateBook = serde_json::from_value(serde_json::json!({"title": "Manual title", "author": "Manual author"})).unwrap();
+        let edit: UpdateBook = serde_json::from_value(
+            serde_json::json!({"title": "Manual title", "author": "Manual author"}),
+        )
+        .unwrap();
         db.update_book(book.id, &edit).await.unwrap();
         let mut known = db.scan_index().await.unwrap();
         known.get_mut("fallback.epub").unwrap().metadata_scanned = false;
         let (books, _, _) = scan(&root, ScanProfile::Balanced, &known, |_| {}).unwrap();
         db.sync_scan(&books).await.unwrap();
         assert_eq!(db.book(book.id).await.unwrap().title, "Manual title");
-        assert_eq!(db.book(book.id).await.unwrap().author.as_deref(), Some("Manual author"));
-        let (books, _, _) = scan(&root, ScanProfile::Complete, &db.scan_index().await.unwrap(), |_| {}).unwrap();
+        assert_eq!(
+            db.book(book.id).await.unwrap().author.as_deref(),
+            Some("Manual author")
+        );
+        let (books, _, _) = scan(
+            &root,
+            ScanProfile::Complete,
+            &db.scan_index().await.unwrap(),
+            |_| {},
+        )
+        .unwrap();
         assert!(books[0].unchanged);
         drop(db);
         std::fs::remove_dir_all(root).unwrap();
@@ -1239,15 +1359,25 @@ mod restore_tests {
         db.snapshot_to(&snapshot).await.unwrap();
         db.set_setting("test-marker", "changed").await.unwrap();
         db.replace_from(&snapshot).await.unwrap();
-        assert_eq!(db.setting("test-marker").await.unwrap().as_deref(), Some("snapshot"));
+        assert_eq!(
+            db.setting("test-marker").await.unwrap().as_deref(),
+            Some("snapshot")
+        );
         let invalid = root.join("invalid.db");
         {
             let candidate = Connection::open(&invalid).unwrap();
-            candidate.execute_batch("CREATE TABLE books (invalid_column TEXT);").unwrap();
+            candidate
+                .execute_batch("CREATE TABLE books (invalid_column TEXT);")
+                .unwrap();
         }
         assert!(db.replace_from(&invalid).await.is_err());
-        assert_eq!(db.setting("test-marker").await.unwrap().as_deref(), Some("snapshot"));
-        db.set_setting("test-marker", "still-writable").await.unwrap();
+        assert_eq!(
+            db.setting("test-marker").await.unwrap().as_deref(),
+            Some("snapshot")
+        );
+        db.set_setting("test-marker", "still-writable")
+            .await
+            .unwrap();
         drop(db);
         std::fs::remove_dir_all(root).unwrap();
     }

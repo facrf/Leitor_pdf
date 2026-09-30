@@ -293,7 +293,8 @@ fn normalize_archive_join(base: &Path, href: &str) -> AppResult<String> {
     let mut remaining = href.as_bytes();
     while let Some((&first, rest)) = remaining.split_first() {
         if first == b'%' {
-            let hex = remaining.get(1..3)
+            let hex = remaining
+                .get(1..3)
                 .ok_or_else(|| AppError::BadRequest("escape EPUB incompleto".into()))?;
             let hex = std::str::from_utf8(hex)
                 .map_err(|_| AppError::BadRequest("escape EPUB invalido".into()))?;

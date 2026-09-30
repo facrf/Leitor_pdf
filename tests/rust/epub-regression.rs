@@ -17,14 +17,30 @@ fn encoded_epub_hrefs_resolve_real_zip_entries() {
     let manifest = epub_manifest(&path).unwrap();
     assert_eq!(manifest.chapters[0].href, "OPS/capítulo um#.xhtml");
     let (bytes, _) = archive_resource(&path, &manifest.chapters[0].href, 1024).unwrap();
-    assert!(String::from_utf8(bytes).unwrap().contains("Capitulo de teste"));
+    assert!(String::from_utf8(bytes)
+        .unwrap()
+        .contains("Capitulo de teste"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn decoded_epub_paths_cannot_escape_archive_root() {
-    assert_eq!(normalize_archive_join(Path::new("OPS"), "../text/a.xhtml").unwrap(), "text/a.xhtml");
-    for href in ["%2e%2e/%2e%2e/outside", "%2foutside", "a%5cb.xhtml", "a%00.xhtml", "a%zz.xhtml", "a%2", "%ff.xhtml"] {
-        assert!(normalize_archive_join(Path::new("OPS"), href).is_err(), "{href}");
+    assert_eq!(
+        normalize_archive_join(Path::new("OPS"), "../text/a.xhtml").unwrap(),
+        "text/a.xhtml"
+    );
+    for href in [
+        "%2e%2e/%2e%2e/outside",
+        "%2foutside",
+        "a%5cb.xhtml",
+        "a%00.xhtml",
+        "a%zz.xhtml",
+        "a%2",
+        "%ff.xhtml",
+    ] {
+        assert!(
+            normalize_archive_join(Path::new("OPS"), href).is_err(),
+            "{href}"
+        );
     }
 }

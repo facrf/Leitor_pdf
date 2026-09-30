@@ -43,7 +43,11 @@ pub async fn generate_one(
         .arg("-jpeg")
         .arg(&source)
         .arg(&output_base);
-    let status = run_renderer(&mut command, Duration::from_secs(config.cover_timeout_seconds)).await?;
+    let status = run_renderer(
+        &mut command,
+        Duration::from_secs(config.cover_timeout_seconds),
+    )
+    .await?;
     if !status.success() || !output_file.is_file() {
         let _ = tokio::fs::remove_file(&output_file).await;
         return Err(AppError::BadRequest(format!(
@@ -62,14 +66,17 @@ pub async fn generate_one(
 
 /// Encerra e aguarda o renderizador ao exceder o prazo; cancelamento tambem o mata.
 async fn run_renderer(command: &mut Command, timeout: Duration) -> AppResult<ExitStatus> {
-    let mut child = command.kill_on_drop(true)
+    let mut child = command
+        .kill_on_drop(true)
         .spawn()
         .map_err(|error| AppError::Internal(format!("pdftoppm indisponivel: {error}")))?;
     match tokio::time::timeout(timeout, child.wait()).await {
         Ok(status) => Ok(status?),
         Err(_) => {
             child.kill().await?;
-            Err(AppError::BadRequest("tempo limite excedido ao gerar capa".into()))
+            Err(AppError::BadRequest(
+                "tempo limite excedido ao gerar capa".into(),
+            ))
         }
     }
 }

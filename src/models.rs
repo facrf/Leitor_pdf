@@ -253,21 +253,28 @@ pub fn validate_location(location: &serde_json::Value) -> crate::error::AppResul
             if value.as_u64().is_none_or(|number| {
                 number > 9_007_199_254_740_991 || (key == "page" && number == 0)
             }) {
-                return Err(AppError::BadRequest(format!("campo {key} da posicao invalido")));
+                return Err(AppError::BadRequest(format!(
+                    "campo {key} da posicao invalido"
+                )));
             }
         }
     }
     if let Some(value) = location.get("percent") {
-        if value.as_f64().is_none_or(|number| {
-            !number.is_finite() || !(0.0..=100.0).contains(&number)
-        }) {
-            return Err(AppError::BadRequest("percentual da posicao invalido".into()));
+        if value
+            .as_f64()
+            .is_none_or(|number| !number.is_finite() || !(0.0..=100.0).contains(&number))
+        {
+            return Err(AppError::BadRequest(
+                "percentual da posicao invalido".into(),
+            ));
         }
     }
     if location.get("type").is_some_and(|value| !value.is_string())
         || location.get("href").is_some_and(|value| !value.is_string())
     {
-        return Err(AppError::BadRequest("tipo ou href da posicao invalido".into()));
+        return Err(AppError::BadRequest(
+            "tipo ou href da posicao invalido".into(),
+        ));
     }
     Ok(())
 }

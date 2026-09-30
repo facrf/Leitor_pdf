@@ -6,8 +6,12 @@ use std::path::PathBuf;
 pub struct PendingFile(Option<PathBuf>);
 
 impl PendingFile {
-    pub fn track(&mut self, path: PathBuf) { self.0 = Some(path); }
-    pub fn commit(&mut self) { self.0 = None; }
+    pub fn track(&mut self, path: PathBuf) {
+        self.0 = Some(path);
+    }
+    pub fn commit(&mut self) {
+        self.0 = None;
+    }
 }
 
 impl Drop for PendingFile {

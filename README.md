@@ -107,6 +107,8 @@ Essas são plataformas de contêiner Linux. Um binário portátil nativo para Wi
 
 Um push em `main` atualiza a tag `latest`; uma tag Git como `v1.0.0` publica também as tags de versão. Como o remoto atual pode não ser o GitHub, espelhe ou envie o repositório para o GitHub e habilite em **Settings → Actions → General** a permissão de leitura e escrita para workflows. Em seguida, torne o pacote público ou forneça credenciais de leitura aos servidores Portainer.
 
+Para gerar a imagem imediatamente no GitHub, abra **Actions → Publicar imagem Docker → Run workflow**, selecione `main` e execute. A publicação só começa depois que todas as verificações passam. Acompanhe o job **GHCR multi-plataforma** para confirmar o envio de `ghcr.io/<proprietário>/estante-livre:latest`. O workflow precisa estar no repositório GitHub; um push somente no servidor Git local não dispara o GitHub Actions.
+
 ## Privacidade e funcionamento offline
 
 Todo o catálogo, metadados salvos, progresso, configurações, coleções e anotações ficam em `./data/library.db`; capas ficam em `./data/covers`, a identidade visual em `./data/branding` e os backups em `./data/backups`. A leitura, busca local, upload, sugestões, capas de PDF e download não dependem da internet.

@@ -120,7 +120,10 @@ pub fn router(state: AppState) -> Router {
         .route("/maintenance/covers", post(start_cover_generation))
         .route("/opds", get(opds_catalog))
         .route("/opds/import", post(import_opds))
-        .layer(middleware::from_fn_with_state(maintenance_gate, coordinate_restore))
+        .layer(middleware::from_fn_with_state(
+            maintenance_gate,
+            coordinate_restore,
+        ))
         .layer(middleware::from_fn(enforce_same_origin))
         .layer(middleware::from_fn_with_state(
             auth_config,
@@ -1020,10 +1023,14 @@ struct RestoreReservation(Arc<Mutex<ScanStatus>>);
 
 impl RestoreReservation {
     fn acquire(state: &AppState) -> AppResult<Self> {
-        let mut status = state.scan_status.lock()
+        let mut status = state
+            .scan_status
+            .lock()
             .map_err(|_| AppError::Internal("estado da tarefa indisponivel".into()))?;
         if status.running {
-            return Err(AppError::BadRequest("aguarde a tarefa atual terminar antes de restaurar".into()));
+            return Err(AppError::BadRequest(
+                "aguarde a tarefa atual terminar antes de restaurar".into(),
+            ));
         }
         *status = ScanStatus::idle();
         status.running = true;
@@ -1034,7 +1041,9 @@ impl RestoreReservation {
 
 impl Drop for RestoreReservation {
     fn drop(&mut self) {
-        if let Ok(mut status) = self.0.lock() { *status = ScanStatus::idle(); }
+        if let Ok(mut status) = self.0.lock() {
+            *status = ScanStatus::idle();
+        }
     }
 }
 
@@ -1189,13 +1198,19 @@ async fn opds_catalog(
     let next = if u64::from(page.offset) + u64::from(page.limit) < page.total {
         let mut url = url::Url::parse(&format!("{base_url}{uri}"))
             .map_err(|_| AppError::BadRequest("URL do catalogo invalida".into()))?;
-        let pairs: Vec<_> = url.query_pairs()
+        let pairs: Vec<_> = url
+            .query_pairs()
             .filter(|(key, _)| key != "offset" && key != "limit")
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
             .collect();
-        url.query_pairs_mut().clear().extend_pairs(pairs)
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(pairs)
             .append_pair("limit", &page.limit.to_string())
-            .append_pair("offset", &(u64::from(page.offset) + u64::from(page.limit)).to_string());
+            .append_pair(
+                "offset",
+                &(u64::from(page.offset) + u64::from(page.limit)).to_string(),
+            );
         Some(url.to_string())
     } else {
         None
@@ -1300,7 +1315,10 @@ async fn apply_metadata(
         drop(output);
         cover_filename = Some(filename);
     }
-    state.db.update_book_with_cover(id, &update, cover_filename.as_deref()).await?;
+    state
+        .db
+        .update_book_with_cover(id, &update, cover_filename.as_deref())
+        .await?;
     cleanup.commit();
     let cover_saved = cover_filename.is_some();
     Ok(Json(
@@ -1515,12 +1533,26 @@ async fn stream_file(
     }
     let safe_filename = filename.replace(['"', '\r', '\n'], "_");
     // Somente formatos passivos conhecidos podem ser abertos na origem do app.
-    let inline_safe = matches!(mime.as_str(),
-        "application/pdf" | "image/png" | "image/jpeg" | "image/gif" |
-        "image/webp" | "image/x-icon" | "image/vnd.microsoft.icon" | "text/plain"
+    let inline_safe = matches!(
+        mime.as_str(),
+        "application/pdf"
+            | "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/x-icon"
+            | "image/vnd.microsoft.icon"
+            | "text/plain"
     );
-    let disposition = if download || !inline_safe { "attachment" } else { "inline" };
-    response.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    let disposition = if download || !inline_safe {
+        "attachment"
+    } else {
+        "inline"
+    };
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     if !inline_safe {
         add_sandbox_headers(response.headers_mut());
     }
@@ -1578,24 +1610,41 @@ mod tests {
         let root = PathBuf::from(format!(".test-stream-{}", rand::random::<u64>()));
         tokio::fs::create_dir(&root).await.unwrap();
         let path = root.join("book.html");
-        tokio::fs::write(&path, b"<script>alert(1)</script>").await.unwrap();
+        tokio::fs::write(&path, b"<script>alert(1)</script>")
+            .await
+            .unwrap();
         for headers in [HeaderMap::new(), {
             let mut headers = HeaderMap::new();
             headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-4"));
             headers
         }] {
-            let response = stream_file(path.clone(), "book.html", false, &headers).await.unwrap();
-            assert!(response.headers()[header::CONTENT_DISPOSITION].to_str().unwrap().starts_with("attachment;"));
-            assert_eq!(response.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
-            assert!(response.headers()[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("script-src 'none'"));
+            let response = stream_file(path.clone(), "book.html", false, &headers)
+                .await
+                .unwrap();
+            assert!(response.headers()[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .starts_with("attachment;"));
+            assert_eq!(
+                response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+                "nosniff"
+            );
+            assert!(response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .contains("script-src 'none'"));
         }
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
     async fn cover_paths_reject_traversal() {
-        assert!(confined_asset_path(Path::new("unused"), "../secret.txt").await.is_err());
-        assert!(confined_asset_path(Path::new("unused"), "/secret.txt").await.is_err());
+        assert!(confined_asset_path(Path::new("unused"), "../secret.txt")
+            .await
+            .is_err());
+        assert!(confined_asset_path(Path::new("unused"), "/secret.txt")
+            .await
+            .is_err());
     }
 
     #[test]

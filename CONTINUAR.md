@@ -1,5 +1,29 @@
 # Checkpoint — 2026-09-30
 
+## Tarefa atual — gerar imagem pelo GitHub
+
+- O usuário pediu que o GitHub gere a imagem Docker. O workflow existente
+  `.github/workflows/publish-image.yml` já testa e publica no GHCR em push de
+  `main`, tags `v*` e execução manual; PRs apenas validam.
+- GitHub confirmado pelo usuário: https://github.com/facrf/Leitor_pdf.
+  O remoto `origin` continua no servidor Git local. Ambos estavam no commit
+  caf0a07 ao conferir. A execução GitHub 36733275084 falhou em formatação Rust;
+  publicação foi pulada. Confirmar espelhamento após enviar as correções.
+- Corrigida a formatação Rust que bloquearia `cargo fmt --check` e a leitura
+  ignorada no teste de metadados que bloquearia Clippy. Mudanças estão locais.
+- `.dockerignore` exclui agora `.cache`; README explica como executar o workflow.
+- Rustfmt e Clippy instalados no toolchain local em `.cache/`, dentro do projeto.
+- Verificações nesta tarefa: formatação, Clippy sem avisos, 28 testes Rust
+  (1 ignorado), teste de volume executado separadamente e aprovado, UI, API,
+  autenticação, navegador (1 cenário) e `git diff --check`: passaram.
+- `docker build --tag estante-livre:ci .`: passou em linux/amd64, incluindo
+  28 testes release (1 ignorado). ARM ainda depende da execução no GitHub.
+- Compose local não validado: o plugin `docker compose` está indisponível.
+- Próximo passo: enviar as correções, confirmar que chegaram ao GitHub,
+  acompanhar Actions e confirmar a publicação da imagem no GHCR.
+
+O histórico abaixo se refere à revisão anterior.
+
 ## Retomar
 
 Leia AGENTS.md, confira git status/git diff e este checkpoint antes de editar.

@@ -63,8 +63,14 @@ impl Config {
                 "defina AUTH_USERNAME e AUTH_PASSWORD juntos, ou deixe ambos vazios".into(),
             ));
         }
-        if self.auth_username.as_deref().is_some_and(|value| value.contains(':')) {
-            return Err(AppError::BadRequest("AUTH_USERNAME nao pode conter dois-pontos".into()));
+        if self
+            .auth_username
+            .as_deref()
+            .is_some_and(|value| value.contains(':'))
+        {
+            return Err(AppError::BadRequest(
+                "AUTH_USERNAME nao pode conter dois-pontos".into(),
+            ));
         }
         if !(1..=600).contains(&self.cover_timeout_seconds) {
             return Err(AppError::BadRequest(

@@ -155,13 +155,20 @@ pub async fn download_cover(
 
 /// Limita memoria durante a leitura, mesmo sem Content-Length.
 pub async fn limited_body(mut response: reqwest::Response, limit: usize) -> AppResult<Vec<u8>> {
-    if response.content_length().is_some_and(|size| size > limit as u64) {
-        return Err(AppError::BadRequest("resposta externa grande demais".into()));
+    if response
+        .content_length()
+        .is_some_and(|size| size > limit as u64)
+    {
+        return Err(AppError::BadRequest(
+            "resposta externa grande demais".into(),
+        ));
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         if chunk.len() > limit.saturating_sub(bytes.len()) {
-            return Err(AppError::BadRequest("resposta externa grande demais".into()));
+            return Err(AppError::BadRequest(
+                "resposta externa grande demais".into(),
+            ));
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -173,12 +180,20 @@ pub async fn limited_body(mut response: reqwest::Response, limit: usize) -> AppR
 pub async fn public_get(mut url: url::Url) -> AppResult<reqwest::Response> {
     for hop in 0..=3 {
         validate_public_http_url(url.as_str())?;
-        let host = url.host_str().ok_or_else(|| AppError::BadRequest("URL sem host".into()))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| AppError::BadRequest("URL sem host".into()))?;
         let host = host.trim_start_matches('[').trim_end_matches(']');
-        let port = url.port_or_known_default().ok_or_else(|| AppError::BadRequest("porta invalida".into()))?;
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| AppError::BadRequest("porta invalida".into()))?;
         let addresses: Vec<_> = tokio::time::timeout(
-            std::time::Duration::from_secs(15), tokio::net::lookup_host((host, port))
-        ).await.map_err(|_| AppError::BadRequest("tempo DNS excedido".into()))??.collect();
+            std::time::Duration::from_secs(15),
+            tokio::net::lookup_host((host, port)),
+        )
+        .await
+        .map_err(|_| AppError::BadRequest("tempo DNS excedido".into()))??
+        .collect();
         if addresses.is_empty() || addresses.iter().any(|address| is_private_ip(address.ip())) {
             return Err(AppError::BadRequest("destino de rede nao publico".into()));
         }
@@ -191,11 +206,17 @@ pub async fn public_get(mut url: url::Url) -> AppResult<reqwest::Response> {
             .build()?;
         let response = client.get(url.clone()).send().await?;
         if response.status().is_redirection() {
-            if hop == 3 { return Err(AppError::BadRequest("redirecionamentos demais".into())); }
-            let location = response.headers().get(reqwest::header::LOCATION)
+            if hop == 3 {
+                return Err(AppError::BadRequest("redirecionamentos demais".into()));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
                 .and_then(|value| value.to_str().ok())
                 .ok_or_else(|| AppError::BadRequest("redirecionamento sem destino".into()))?;
-            url = url.join(location).map_err(|_| AppError::BadRequest("destino invalido".into()))?;
+            url = url
+                .join(location)
+                .map_err(|_| AppError::BadRequest("destino invalido".into()))?;
         } else {
             return Ok(response.error_for_status()?);
         }
@@ -216,7 +237,11 @@ pub fn validate_public_http_url(url: &str) -> AppResult<url::Url> {
         if host.eq_ignore_ascii_case("localhost") || host.ends_with(".local") {
             return Err(AppError::BadRequest("host local recusado".into()));
         }
-        if let Ok(ip) = host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+        if let Ok(ip) = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+        {
             if ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) {
                 return Err(AppError::BadRequest("endereco privado recusado".into()));
             }
@@ -229,9 +254,15 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(value) => {
             let [a, b, _, _] = value.octets();
-            value.is_private() || value.is_link_local() || value.is_broadcast()
-                || value.is_loopback() || value.is_unspecified() || value.is_multicast()
-                || value.is_documentation() || a == 0 || a >= 240
+            value.is_private()
+                || value.is_link_local()
+                || value.is_broadcast()
+                || value.is_loopback()
+                || value.is_unspecified()
+                || value.is_multicast()
+                || value.is_documentation()
+                || a == 0
+                || a >= 240
                 || (a == 100 && (64..=127).contains(&b))
                 || (a == 198 && (18..=19).contains(&b))
                 || (a == 192 && b == 0)
@@ -318,10 +349,25 @@ mod tests {
 
     #[test]
     fn refuses_non_public_literal_addresses() {
-        for address in ["127.0.0.1", "10.0.0.1", "169.254.169.254", "100.64.0.1", "224.0.0.1", "::1", "::ffff:127.0.0.1", "fc00::1", "fe80::1"] {
+        for address in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "224.0.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "fc00::1",
+            "fe80::1",
+        ] {
             assert!(is_private_ip(address.parse().unwrap()), "{address}");
         }
-        for url in ["http://[::1]/", "http://[::ffff:127.0.0.1]/", "http://127.0.0.1/", "http://user:secret@example.com/"] {
+        for url in [
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://127.0.0.1/",
+            "http://user:secret@example.com/",
+        ] {
             assert!(validate_public_http_url(url).is_err(), "{url}");
         }
         assert!(!is_private_ip("8.8.8.8".parse().unwrap()));
@@ -337,12 +383,25 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = [0; 4096];
-                socket.read(&mut request).await.unwrap();
-                socket.write_all(format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{body}").as_bytes()).await.unwrap();
+                let bytes_read = socket.read(&mut request).await.unwrap();
+                assert!(bytes_read > 0, "cliente encerrou a conexao sem requisicao");
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{body}").as_bytes(),
+                    )
+                    .await
+                    .unwrap();
             });
-            let client = reqwest::Client::builder().no_proxy()
-                .timeout(std::time::Duration::from_secs(2)).build().unwrap();
-            let response = client.get(format!("http://{address}/")).send().await.unwrap();
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap();
+            let response = client
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
             assert!(response.content_length().is_none());
             assert_eq!(limited_body(response, 4).await.is_ok(), accepted);
             server.await.unwrap();

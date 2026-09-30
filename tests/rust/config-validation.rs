@@ -1,10 +1,18 @@
 use super::*;
 
 fn fixture_config() -> Config {
-    Config { bind:"127.0.0.1:20000".into(), initial_library_root:"tests/fixtures/e2e".into(),
-        database_path:"tests/runtime-data-config/library.db".into(), covers_dir:"data/covers".into(),
-        branding_dir:"data/branding".into(), backup_dir:"data/backups".into(),
-        google_books_api_key:None, auth_username:None, auth_password:None, cover_timeout_seconds:60 }
+    Config {
+        bind: "127.0.0.1:20000".into(),
+        initial_library_root: "tests/fixtures/e2e".into(),
+        database_path: "tests/runtime-data-config/library.db".into(),
+        covers_dir: "data/covers".into(),
+        branding_dir: "data/branding".into(),
+        backup_dir: "data/backups".into(),
+        google_books_api_key: None,
+        auth_username: None,
+        auth_password: None,
+        cover_timeout_seconds: 60,
+    }
 }
 
 #[test]
@@ -26,6 +34,12 @@ fn authentication_requires_both_credentials_and_a_valid_username() {
 #[test]
 fn cover_deadline_must_be_bounded() {
     let mut config = fixture_config();
-    for seconds in [1, 60, 600] { config.cover_timeout_seconds = seconds; config.validate().unwrap(); }
-    for seconds in [0, 601, u64::MAX] { config.cover_timeout_seconds = seconds; assert!(config.validate().is_err()); }
+    for seconds in [1, 60, 600] {
+        config.cover_timeout_seconds = seconds;
+        config.validate().unwrap();
+    }
+    for seconds in [0, 601, u64::MAX] {
+        config.cover_timeout_seconds = seconds;
+        assert!(config.validate().is_err());
+    }
 }
