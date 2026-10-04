@@ -6,11 +6,11 @@
   `.github/workflows/publish-image.yml` já testa e publica no GHCR em push de
   `main`, tags `v*` e execução manual; PRs apenas validam.
 - GitHub confirmado pelo usuário: https://github.com/facrf/Leitor_pdf.
-  O remoto `origin` continua no servidor Git local. Ambos estavam no commit
-  caf0a07 ao conferir. A execução GitHub 36733275084 falhou em formatação Rust;
-  publicação foi pulada. Confirmar espelhamento após enviar as correções.
+  O remoto `origin` continua no servidor Git local, que espelha automaticamente
+  os pushes no GitHub. Commit 7a2d74c enviado a origin/main e confirmado no GitHub.
+  A execução anterior 36733275084 falhou em formatação Rust; publicação foi pulada.
 - Corrigida a formatação Rust que bloquearia `cargo fmt --check` e a leitura
-  ignorada no teste de metadados que bloquearia Clippy. Mudanças estão locais.
+  ignorada no teste de metadados que bloquearia Clippy. Correções publicadas no Git.
 - `.dockerignore` exclui agora `.cache`; README explica como executar o workflow.
 - Rustfmt e Clippy instalados no toolchain local em `.cache/`, dentro do projeto.
 - Verificações nesta tarefa: formatação, Clippy sem avisos, 28 testes Rust
@@ -19,8 +19,15 @@
 - `docker build --tag estante-livre:ci .`: passou em linux/amd64, incluindo
   28 testes release (1 ignorado). ARM ainda depende da execução no GitHub.
 - Compose local não validado: o plugin `docker compose` está indisponível.
-- Próximo passo: enviar as correções, confirmar que chegaram ao GitHub,
-  acompanhar Actions e confirmar a publicação da imagem no GHCR.
+- Execução disparada pelo push: https://github.com/facrf/Leitor_pdf/actions/runs/36736319355.
+  Job de testes concluído com sucesso no GitHub, incluindo Compose e build Docker.
+  Job GHCR multi-plataforma em andamento na última consulta; publicação final
+  ainda não confirmada. A execução bem-sucedida anterior 33384007920 levou
+  87,1 minutos no job de publicação; ARM usa QEMU neste workflow.
+- Próximo passo: consultar a execução 36736319355 e confirmar sua conclusão,
+  imagem ghcr.io/facrf/estante-livre:latest e plataformas AMD64/ARM64/ARMv7.
+  Este registro de acompanhamento está local para não disparar outro build
+  apenas por uma alteração de documentação.
 
 O histórico abaixo se refere à revisão anterior.
 
