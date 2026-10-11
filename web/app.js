@@ -315,6 +315,8 @@ async function loadShares() {
 }
 
 async function openReader(book) {
+  clearInterval(state.carouselTimer);
+  state.carouselTimer = null;
   state.currentBook = book;
   state.reader = { kind: book.format, location: book.progress?.location || {}, percent: book.progress?.percent || 0, items: [] };
   if (!state.reader.percent) state.reader.percent = book.page_count ? Math.min(99, 100 / book.page_count) : 0.1;
@@ -433,7 +435,7 @@ async function closeReader() {
   clearTimeout(state.progressSaveTimer);
   await persistProgress();
   $('#reader').classList.add('hidden'); $('#notes-panel').classList.remove('open'); document.body.style.overflow = '';
-  await Promise.all([loadBooks($('#search').value), loadReadingDesk()]);
+  await Promise.all([loadBooks($('#search').value), loadReadingDesk(), loadSuggestions()]);
 }
 
 async function loadSettings() {

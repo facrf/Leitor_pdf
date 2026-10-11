@@ -69,7 +69,10 @@ pub async fn create(db: &Database, config: &Config) -> AppResult<BackupInfo> {
     .await
     .map_err(|error| AppError::Internal(error.to_string()))?;
     let _ = tokio::fs::remove_file(&snapshot).await;
-    result?;
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(&destination).await;
+        return Err(error);
+    }
     let metadata = tokio::fs::metadata(&destination).await?;
     Ok(BackupInfo {
         filename,

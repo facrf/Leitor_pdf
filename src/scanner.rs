@@ -339,15 +339,14 @@ fn partial_content_hash(path: &Path, size: u64) -> AppResult<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     hasher.update(size.to_le_bytes());
-    let mut buffer = vec![0_u8; SAMPLE_SIZE.min(size as usize)];
+    let sample = (size.min(SAMPLE_SIZE as u64)) as usize;
+    let mut buffer = vec![0_u8; sample];
     if !buffer.is_empty() {
         file.read_exact(&mut buffer)?;
         hasher.update(&buffer);
     }
     if size > SAMPLE_SIZE as u64 {
-        let tail_size = SAMPLE_SIZE.min(size as usize);
-        file.seek(SeekFrom::End(-(tail_size as i64)))?;
-        buffer.resize(tail_size, 0);
+        file.seek(SeekFrom::End(-(SAMPLE_SIZE as i64)))?;
         file.read_exact(&mut buffer)?;
         hasher.update(&buffer);
     }
@@ -355,12 +354,20 @@ fn partial_content_hash(path: &Path, size: u64) -> AppResult<String> {
 }
 
 fn filename_title(path: &Path, filename: &str) -> String {
-    let value = path
+    let raw = path
         .file_stem()
         .and_then(|value| value.to_str())
-        .unwrap_or(filename)
-        .replace(['_', '-'], " ");
-    let cleaned = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        .unwrap_or(filename);
+    let mut cleaned = String::with_capacity(raw.len());
+    for word in raw
+        .split(|c: char| c == '_' || c == '-' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+    {
+        if !cleaned.is_empty() {
+            cleaned.push(' ');
+        }
+        cleaned.push_str(word);
+    }
     if cleaned.is_empty() {
         filename.to_string()
     } else {
@@ -596,6 +603,21 @@ mod tests {
         assert_eq!(
             sanitize_metadata_text("  Grande   Sertão: Veredas  ").as_deref(),
             Some("Grande Sertão: Veredas")
+        );
+    }
+
+    #[test]
+    fn formats_filename_title_correctly() {
+        assert_eq!(
+            filename_title(
+                Path::new("meu_livro-favorito.pdf"),
+                "meu_livro-favorito.pdf"
+            ),
+            "meu livro favorito"
+        );
+        assert_eq!(
+            filename_title(Path::new("___---   .pdf"), "___---   .pdf"),
+            "___---   .pdf"
         );
     }
 

@@ -119,3 +119,48 @@ async fn metadata_and_cover_change_together_and_validation_preserves_old_values(
     db.update_book(1, &update).await.unwrap();
     assert_eq!(db.cover_filename(1).await.unwrap(), "new.jpg");
 }
+
+#[tokio::test]
+async fn providers_reject_private_or_internal_addresses() {
+    let db = fixture_database();
+    for bad_url in [
+        "http://127.0.0.1:8080",
+        "http://localhost:5000",
+        "http://169.254.169.254/metadata",
+        "http://10.0.0.1/books",
+    ] {
+        let provider = SaveProvider {
+            name: "Fonte insegura".into(),
+            kind: "open_library".into(),
+            base_url: bad_url.into(),
+            enabled: true,
+        };
+        assert!(db.add_provider(&provider).await.is_err(), "{bad_url}");
+    }
+    let valid_provider = SaveProvider {
+        name: "Fonte publica".into(),
+        kind: "open_library".into(),
+        base_url: "https://example.org/api".into(),
+        enabled: true,
+    };
+    assert!(db.add_provider(&valid_provider).await.is_ok());
+}
+
+#[tokio::test]
+async fn facets_extract_subjects_and_years_correctly() {
+    let db = fixture_database();
+    {
+        let conn = db.connection.lock().await;
+        conn.execute(
+            "UPDATE books SET subjects = '[\"Ficção\", \"Aventura\"]', published_date = '1984-05-12' WHERE id = 1",
+            [],
+        ).unwrap();
+        conn.execute(
+            "UPDATE books SET subjects = '[\"Ficção\", \"Drama\"]', published_date = '2001' WHERE id = 2",
+            [],
+        ).unwrap();
+    }
+    let facets = db.catalog_facets().await.unwrap();
+    assert_eq!(facets.subjects, vec!["Aventura", "Drama", "Ficção"]);
+    assert_eq!(facets.years, vec!["2001", "1984"]);
+}

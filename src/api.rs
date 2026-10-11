@@ -636,7 +636,8 @@ async fn upload_book(
     let original = field
         .file_name()
         .ok_or_else(|| AppError::BadRequest("arquivo sem nome".into()))?;
-    let filename = Path::new(original)
+    let sanitized_original = original.rsplit(['/', '\\']).next().unwrap_or(original);
+    let filename = Path::new(sanitized_original)
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| AppError::BadRequest("nome de arquivo invalido".into()))?
@@ -1531,7 +1532,6 @@ async fn stream_file(
             HeaderValue::from_str(&format!("bytes {start}-{end}/{size}")).unwrap(),
         );
     }
-    let safe_filename = filename.replace(['"', '\r', '\n'], "_");
     // Somente formatos passivos conhecidos podem ser abertos na origem do app.
     let inline_safe = matches!(
         mime.as_str(),
@@ -1558,10 +1558,47 @@ async fn stream_file(
     }
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("{disposition}; filename=\"{safe_filename}\""))
-            .unwrap_or(HeaderValue::from_static("attachment")),
+        content_disposition_header(disposition, filename),
     );
     Ok(response)
+}
+
+/// Gera cabecalho Content-Disposition seguro e compativel com RFC 6266 / RFC 5987.
+/// Mantem a disposicao (inline/attachment) mesmo para arquivos com acentos ou caracteres especiais.
+fn content_disposition_header(disposition: &str, filename: &str) -> HeaderValue {
+    let safe_ascii: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii() && c != '"' && c != '\\' && c != '\r' && c != '\n' && !c.is_control() {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let encoded = percent_encode_header_param(filename);
+    let header_str =
+        format!("{disposition}; filename=\"{safe_ascii}\"; filename*=UTF-8''{encoded}");
+    HeaderValue::from_str(&header_str).unwrap_or_else(|_| {
+        HeaderValue::from_static(if disposition == "inline" {
+            "inline"
+        } else {
+            "attachment"
+        })
+    })
+}
+
+fn percent_encode_header_param(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() * 3);
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(*byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(encoded, "%{:02X}", byte);
+        }
+    }
+    encoded
 }
 
 fn parse_range(value: &str, size: u64) -> Option<(u64, u64)> {
@@ -1653,5 +1690,18 @@ mod tests {
         assert_eq!(parse_range("bytes=100-", 200), Some((100, 199)));
         assert_eq!(parse_range("bytes=-20", 200), Some((180, 199)));
         assert_eq!(parse_range("bytes=300-", 200), None);
+    }
+
+    #[test]
+    fn formats_content_disposition_with_utf8_filename() {
+        let header = content_disposition_header("inline", "Grande Sertão.pdf");
+        let value = header.to_str().unwrap();
+        assert!(value.starts_with("inline; filename=\"Grande Sert_o.pdf\";"));
+        assert!(value.contains("filename*=UTF-8''Grande%20Sert%C3%A3o.pdf"));
+
+        let header_dl = content_disposition_header("attachment", "Memórias.epub");
+        let value_dl = header_dl.to_str().unwrap();
+        assert!(value_dl.starts_with("attachment; filename=\"Mem_rias.epub\";"));
+        assert!(value_dl.contains("filename*=UTF-8''Mem%C3%B3rias.epub"));
     }
 }

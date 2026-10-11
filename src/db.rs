@@ -1,11 +1,7 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -178,8 +174,47 @@ impl Database {
         let mut added = 0;
         let mut updated = 0;
         let mut unchanged = 0;
+        let now = Utc::now().to_rfc3339();
+        let mut select_stmt = tx.prepare("SELECT title FROM books WHERE relative_path=?1")?;
+        let mut upsert_stmt = tx.prepare(
+            "INSERT INTO books (title, author, filename, relative_path, format, size, modified_at,
+              page_count, content_hash, is_available, created_at, updated_at, metadata_scanned)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?10, ?13)
+             ON CONFLICT(relative_path) DO UPDATE SET filename=excluded.filename, format=excluded.format,
+              size=excluded.size, modified_at=excluded.modified_at, page_count=COALESCE(excluded.page_count, books.page_count),
+              content_hash=COALESCE(excluded.content_hash, books.content_hash),
+              title=CASE WHEN ?11 OR (books.metadata_edited=0 AND excluded.metadata_scanned=1)
+                    THEN excluded.title ELSE books.title END,
+              author=CASE WHEN ?11 OR (books.metadata_edited=0 AND excluded.metadata_scanned=1)
+                    THEN COALESCE(excluded.author, books.author) ELSE books.author END,
+              metadata_scanned=excluded.metadata_scanned,
+              is_available=1,
+              updated_at=CASE WHEN ?12 THEN books.updated_at ELSE excluded.updated_at END",
+        )?;
         for book in books {
-            if upsert_scanned(&tx, book)? {
+            let existing_title: Option<String> = select_stmt
+                .query_row([&book.relative_path], |row| row.get(0))
+                .optional()?;
+            let repair_metadata = existing_title
+                .as_deref()
+                .map(metadata_looks_corrupt)
+                .unwrap_or(false);
+            upsert_stmt.execute(params![
+                book.title,
+                book.author,
+                book.filename,
+                book.relative_path,
+                book.format,
+                book.size,
+                book.modified_at,
+                book.page_count,
+                book.content_hash,
+                now,
+                repair_metadata,
+                book.unchanged,
+                book.metadata_scanned,
+            ])?;
+            if existing_title.is_none() {
                 added += 1;
             } else if book.unchanged {
                 unchanged += 1;
@@ -187,6 +222,8 @@ impl Database {
                 updated += 1;
             }
         }
+        drop(select_stmt);
+        drop(upsert_stmt);
         tx.commit()?;
         Ok((added, updated, unchanged))
     }
@@ -196,15 +233,15 @@ impl Database {
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM scan_issues", [])?;
         let now = Utc::now().to_rfc3339();
+        let mut insert_stmt =
+            tx.prepare("INSERT INTO scan_issues (path, message, created_at) VALUES (?1, ?2, ?3)")?;
         for warning in warnings {
             let (path, message) = warning
                 .split_once(": ")
                 .unwrap_or(("varredura", warning.as_str()));
-            tx.execute(
-                "INSERT INTO scan_issues (path, message, created_at) VALUES (?1, ?2, ?3)",
-                params![path, message, now],
-            )?;
+            insert_stmt.execute(params![path, message, now])?;
         }
+        drop(insert_stmt);
         tx.commit()?;
         Ok(())
     }
@@ -358,11 +395,14 @@ impl Database {
             authors.push(value?);
         }
 
-        let mut subjects = BTreeSet::new();
-        let mut stmt = conn.prepare("SELECT subjects FROM books WHERE is_available=1")?;
-        for value in stmt.query_map([], |row| row.get::<_, String>(0))? {
-            let values: Vec<String> = serde_json::from_str(&value?).unwrap_or_default();
-            subjects.extend(values.into_iter().filter(|value| !value.trim().is_empty()));
+        let mut subjects = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT TRIM(value) FROM books, json_each(books.subjects)
+             WHERE is_available=1 AND json_valid(books.subjects) AND TRIM(value) <> ''
+             ORDER BY TRIM(value) COLLATE NOCASE",
+        )?;
+        for value in stmt.query_map([], |row| row.get(0))? {
+            subjects.push(value?);
         }
         let mut publishers = Vec::new();
         let mut stmt = conn.prepare(
@@ -380,27 +420,24 @@ impl Database {
         for value in stmt.query_map([], |row| row.get(0))? {
             languages.push(value?);
         }
-        let mut years = BTreeSet::new();
+        let mut years = Vec::new();
         let mut stmt = conn.prepare(
-            "SELECT published_date FROM books WHERE is_available=1 AND published_date IS NOT NULL",
+            "SELECT DISTINCT SUBSTR(published_date, 1, 4) AS yr FROM books
+             WHERE is_available=1 AND published_date IS NOT NULL AND LENGTH(published_date) >= 4
+               AND SUBSTR(published_date, 1, 4) GLOB '[0-9][0-9][0-9][0-9]'
+             ORDER BY yr DESC",
         )?;
-        for value in stmt.query_map([], |row| row.get::<_, String>(0))? {
-            let value = value?;
-            if let Some(year) = value
-                .get(..4)
-                .filter(|year| year.chars().all(|c| c.is_ascii_digit()))
-            {
-                years.insert(year.to_string());
-            }
+        for value in stmt.query_map([], |row| row.get(0))? {
+            years.push(value?);
         }
         let collections = query_collections(&conn)?;
         Ok(CatalogFacets {
             formats,
             authors,
-            subjects: subjects.into_iter().collect(),
+            subjects,
             publishers,
             languages,
-            years: years.into_iter().rev().collect(),
+            years,
             collections,
         })
     }
@@ -871,40 +908,6 @@ impl Database {
     }
 }
 
-fn upsert_scanned(tx: &Transaction<'_>, book: &ScannedBook) -> rusqlite::Result<bool> {
-    let existing_title: Option<String> = tx
-        .query_row(
-            "SELECT title FROM books WHERE relative_path=?1",
-            [&book.relative_path],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let repair_metadata = existing_title
-        .as_deref()
-        .map(metadata_looks_corrupt)
-        .unwrap_or(false);
-    let now = Utc::now().to_rfc3339();
-    tx.execute(
-        "INSERT INTO books (title, author, filename, relative_path, format, size, modified_at,
-          page_count, content_hash, is_available, created_at, updated_at, metadata_scanned)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?10, ?13)
-         ON CONFLICT(relative_path) DO UPDATE SET filename=excluded.filename, format=excluded.format,
-          size=excluded.size, modified_at=excluded.modified_at, page_count=COALESCE(excluded.page_count, books.page_count),
-          content_hash=COALESCE(excluded.content_hash, books.content_hash),
-          title=CASE WHEN ?11 OR (books.metadata_edited=0 AND excluded.metadata_scanned=1)
-                THEN excluded.title ELSE books.title END,
-          author=CASE WHEN ?11 OR (books.metadata_edited=0 AND excluded.metadata_scanned=1)
-                THEN COALESCE(excluded.author, books.author) ELSE books.author END,
-          metadata_scanned=excluded.metadata_scanned,
-          is_available=1,
-          updated_at=CASE WHEN ?12 THEN books.updated_at ELSE excluded.updated_at END",
-        params![book.title, book.author, book.filename, book.relative_path, book.format,
-                book.size, book.modified_at, book.page_count, book.content_hash, now,
-                repair_metadata, book.unchanged, book.metadata_scanned],
-    )?;
-    Ok(existing_title.is_none())
-}
-
 fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<Book> {
     let subjects: String = row.get(8)?;
     Ok(Book {
@@ -1013,13 +1016,7 @@ fn validate_provider(provider: &SaveProvider) -> AppResult<()> {
     if !matches!(provider.kind.as_str(), "open_library" | "google_books") {
         return Err(AppError::BadRequest("tipo de fonte invalido".into()));
     }
-    let parsed = url::Url::parse(&provider.base_url)
-        .map_err(|_| AppError::BadRequest("URL da fonte invalida".into()))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(AppError::BadRequest(
-            "a fonte deve usar HTTP ou HTTPS".into(),
-        ));
-    }
+    crate::metadata::validate_public_http_url(&provider.base_url)?;
     Ok(())
 }
 
@@ -1244,6 +1241,7 @@ fn validate_restore_data(candidate: &Connection) -> AppResult<()> {
 fn open_connection(path: &Path) -> AppResult<Connection> {
     let connection = Connection::open(path)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.execute_batch(SCHEMA)?;
     migrate(&connection)?;

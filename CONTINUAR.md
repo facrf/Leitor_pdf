@@ -1,35 +1,40 @@
-# Checkpoint — 2026-09-30
+# Checkpoint — 2026-10-10
 
-## Tarefa atual — gerar imagem pelo GitHub
+## Tarefa atual — verificação do código em busca de melhorias e otimizações
 
-- O usuário pediu que o GitHub gere a imagem Docker. O workflow existente
-  `.github/workflows/publish-image.yml` já testa e publica no GHCR em push de
-  `main`, tags `v*` e execução manual; PRs apenas validam.
-- GitHub confirmado pelo usuário: https://github.com/facrf/Leitor_pdf.
-  O remoto `origin` continua no servidor Git local, que espelha automaticamente
-  os pushes no GitHub. Commit 7a2d74c enviado a origin/main e confirmado no GitHub.
-  A execução anterior 36733275084 falhou em formatação Rust; publicação foi pulada.
-- Corrigida a formatação Rust que bloquearia `cargo fmt --check` e a leitura
-  ignorada no teste de metadados que bloquearia Clippy. Correções publicadas no Git.
-- `.dockerignore` exclui agora `.cache`; README explica como executar o workflow.
-- Rustfmt e Clippy instalados no toolchain local em `.cache/`, dentro do projeto.
-- Verificações nesta tarefa: formatação, Clippy sem avisos, 28 testes Rust
-  (1 ignorado), teste de volume executado separadamente e aprovado, UI, API,
-  autenticação, navegador (1 cenário) e `git diff --check`: passaram.
-- `docker build --tag estante-livre:ci .`: passou em linux/amd64, incluindo
-  28 testes release (1 ignorado). ARM ainda depende da execução no GitHub.
-- Compose local não validado: o plugin `docker compose` está indisponível.
-- Execução disparada pelo push: https://github.com/facrf/Leitor_pdf/actions/runs/36736319355.
-  Job de testes concluído com sucesso no GitHub, incluindo Compose e build Docker.
-  Job GHCR multi-plataforma em andamento na última consulta; publicação final
-  ainda não confirmada. A execução bem-sucedida anterior 33384007920 levou
-  87,1 minutos no job de publicação; ARM usa QEMU neste workflow.
-- Próximo passo: consultar a execução 36736319355 e confirmar sua conclusão,
-  imagem ghcr.io/facrf/estante-livre:latest e plataformas AMD64/ARM64/ARMv7.
-  Este registro de acompanhamento está local para não disparar outro build
-  apenas por uma alteração de documentação.
+- Realizada auditoria ampla e otimizações no backend Rust, SQLite e frontend web.
+- Melhorias e otimizações implementadas:
+  1. `src/api.rs`: cabeçalho `Content-Disposition` formatado com RFC 6266 / RFC 5987 (`filename*`), preservando a disposição (`inline`/`attachment`) e nomes com acentos e caracteres UTF-8 (anteriormente nomes não-ASCII causavam falha de parse no HeaderValue e forçavam download via fallback `attachment`). Sanitização de upload para descartar separadores de caminho estilo Windows (`\`).
+  2. `src/scanner.rs`: evitado truncamento de inteiros em sistemas 32-bit (ex.: ARMv7) no cálculo de buffer de `partial_content_hash` para arquivos maiores que 4 GiB, reutilizando o buffer na leitura da cauda. Otimizada função `filename_title` eliminando alocações intermediárias de strings e vetores durante varredura.
+  3. `src/readers.rs`:
+     - Corrigido `strip_active_html` para elementos void (`<embed>`) e tags auto-fechadas (`<tag .../>`), evitando truncamento indevido do restante do livro quando não há tag de fechamento correspondente, e evitando falsos positivos com prefixos de tags (ex.: `<scripture>`).
+     - Descompressão PalmDOC em MOBI (`mobi_html`): implementado `palmdoc_decompress_append` para descompressão zero-allocation diretamente no buffer de saída, além de delimitar checagens LZ77 ao início de cada registro.
+     - `escape_html`: substituído encadeamento de `.replace()` por escape em passada única com buffer pré-alocado.
+     - `natural_key`: evitada alocação de string em `to_ascii_lowercase()` iterando diretamente sobre caracteres.
+  4. `src/db.rs`:
+     - Protegida adição de fontes de metadados (`validate_provider`) contra SSRF validando URLs públicas via `validate_public_http_url` (impedindo `localhost`, IPs privados ou metadados de nuvem).
+     - Otimizada consulta de facetas (`catalog_facets`) delegando agrupamento e ordenação de assuntos (`json_each` + `json_valid`) e anos (`SUBSTR` + `GLOB`) diretamente ao SQLite sem alocação de `BTreeSet` em memória.
+     - Varredura em lote (`sync_scan` e `save_scan_issues`): pré-preparadas instruções SQL (`select_stmt`, `upsert_stmt`, `insert_stmt`) fora do loop e timestamp `now` computado uma única vez por lote, acelerando a indexação de grandes acervos.
+     - Configurado `PRAGMA synchronous = NORMAL` em conjunto com `journal_mode = WAL` em `open_connection`, reduzindo fsyncs sem comprometer a integridade do banco.
+  5. `src/backup.rs`: limpeza de arquivo de destino incompleto em caso de falha durante a criação do pacote zip em `create`.
+  6. `src/opds.rs`:
+     - Substituído teste síncrono `exists()` por `tokio::fs::try_exists().await` não bloqueante em `unique_destination`.
+     - `escape_xml`: substituído encadeamento de 5 `.replace()` por escape em passada única com buffer pré-alocado.
+     - `catalog_xml`: evitada alocação desnecessária de `String` no MIME essence ao iterar sobre livros.
+  7. `web/app.js`: pausa do temporizador de carrossel de sugestões ao abrir o leitor (`openReader`) e retomada ao fechar (`closeReader`).
+- Verificações executadas:
+  - `cargo fmt --check`: passou.
+  - `cargo clippy --locked --all-targets -- -D warnings`: passou sem avisos (0 warnings).
+  - `cargo test --locked`: 33 passaram, 0 falharam, 1 teste de volume ignorado.
+  - `cargo test --locked indexes_2287_files -- --ignored`: passou em 0,14s (2.287 arquivos).
+  - `npm run test:ui`: passou.
+  - `npm run test:api`: passou.
+  - `npm run test:auth`: passou.
+  - `npm run test:browser`: passou.
+  - `git diff --check`: passou sem problemas de espaço ou formatação.
+- Próximo passo: pronto para commit ou novas orientações do usuário.
 
-O histórico abaixo se refere à revisão anterior.
+O histórico abaixo se refere às revisões anteriores.
 
 ## Retomar
 

@@ -149,7 +149,7 @@ Exemplo de anotação:
 | `GET /metadata/search?provider_id=...&q=...` | Pesquisa uma fonte habilitada. |
 | `PUT /books/{id}/metadata` | Aplica candidato e baixa a capa local, se houver. |
 
-`GET /metadata/search` requer que a busca externa esteja habilitada; caso contrário retorna `403`. Tipos suportados de fonte são `open_library` e `google_books`, apontando para APIs compatíveis.
+`GET /metadata/search` requer que a busca externa esteja habilitada; caso contrário retorna `403`. Tipos suportados de fonte são `open_library` e `google_books`, apontando para APIs compatíveis. O endereço base (`base_url`) de provedores adicionados via `POST /metadata/providers` é validado contra SSRF e deve ser uma URL pública HTTP/HTTPS válida.
 
 ## Compartilhamento
 

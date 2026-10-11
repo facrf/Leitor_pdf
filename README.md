@@ -122,7 +122,7 @@ Somente o texto digitado na consulta é enviado ao provedor selecionado. O conte
 
 Para uma instalação completamente isolada, mantenha a opção desativada e, se desejado, negue acesso de saída ao container. Open Library e Google Books aparecem como fontes nativas, mas não são contatados automaticamente. Uma chave opcional do Google deve ser fornecida apenas pela variável `GOOGLE_BOOKS_API_KEY`; ela não é salva no banco.
 
-Downloads de capas e importações OPDS aceitam somente destinos públicos: os IPs do DNS e cada redirecionamento são validados e fixados na conexão, sem proxy de ambiente. Provedores de metadados configurados pelo administrador continuam podendo usar endpoints locais. Capas e feeds têm limites durante a transferência (10 MiB e 5 MiB); uploads e livros OPDS incompletos são removidos em falhas ou cancelamento, com aviso nos logs se a limpeza falhar.
+Downloads de capas, importações OPDS e provedores de metadados aceitam somente destinos públicos: os IPs do DNS e cada redirecionamento são validados e fixados na conexão contra SSRF, sem proxy de ambiente. Capas e feeds têm limites durante a transferência (10 MiB e 5 MiB); uploads e livros OPDS incompletos são removidos em falhas ou cancelamento, com aviso nos logs se a limpeza falhar.
 
 ## Configuração
 

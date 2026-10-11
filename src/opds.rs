@@ -28,10 +28,8 @@ pub fn catalog_xml(books: &[BookSummary], base_url: &str, next: Option<&str>) ->
     }
     for book in books {
         let author = book.author.as_deref().unwrap_or("Autor nao informado");
-        let media_type = mime_guess::from_ext(&book.format)
-            .first_or_octet_stream()
-            .essence_str()
-            .to_string();
+        let mime = mime_guess::from_ext(&book.format).first_or_octet_stream();
+        let media_type = mime.essence_str();
         xml.push_str(&format!(
             "\n<entry><id>urn:estante-livre:book:{id}</id><title>{title}</title><updated>{book_updated}</updated><author><name>{author}</name></author><category term=\"{format}\"/><link rel=\"http://opds-spec.org/acquisition/open-access\" href=\"{base_url}/api/books/{id}/file?download=true\" type=\"{media_type}\"/>",
             id = book.id,
@@ -178,7 +176,7 @@ async fn download_book(
 
 async fn unique_destination(root: &Path, filename: &str) -> AppResult<PathBuf> {
     let requested = root.join(filename);
-    if !requested.exists() {
+    if !tokio::fs::try_exists(&requested).await? {
         return Ok(requested);
     }
     let path = Path::new(filename);
@@ -192,7 +190,7 @@ async fn unique_destination(root: &Path, filename: &str) -> AppResult<PathBuf> {
         .unwrap_or("");
     for index in 2..=10_000 {
         let candidate = root.join(format!("{stem} ({index}).{extension}"));
-        if !candidate.exists() {
+        if !tokio::fs::try_exists(&candidate).await? {
             return Ok(candidate);
         }
     }
@@ -238,12 +236,18 @@ fn extension_from_mime(value: &str) -> Option<&'static str> {
 }
 
 fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    let mut output = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            '\'' => output.push_str("&apos;"),
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 #[cfg(test)]

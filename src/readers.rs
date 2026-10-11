@@ -158,7 +158,7 @@ pub fn mobi_html(path: &Path) -> AppResult<Vec<u8>> {
         let record = slice_record(&data, &offsets, index)?;
         match compression {
             1 => output.extend_from_slice(record),
-            2 => output.extend_from_slice(&palmdoc_decompress(record)?),
+            2 => palmdoc_decompress_append(record, &mut output)?,
             value => return Err(AppError::Unsupported(format!("compressao MOBI {value}"))),
         }
         if output.len() > 128 * 1024 * 1024 {
@@ -202,8 +202,8 @@ pub fn text_html(path: &Path, format: &str) -> AppResult<Vec<u8>> {
     .into_bytes())
 }
 
-fn palmdoc_decompress(input: &[u8]) -> AppResult<Vec<u8>> {
-    let mut output = Vec::with_capacity(input.len() * 2);
+fn palmdoc_decompress_append(input: &[u8], output: &mut Vec<u8>) -> AppResult<()> {
+    let record_start = output.len();
     let mut cursor = 0;
     while cursor < input.len() {
         let byte = input[cursor];
@@ -227,7 +227,7 @@ fn palmdoc_decompress(input: &[u8]) -> AppResult<Vec<u8>> {
                 cursor += 1;
                 let distance = ((pair >> 3) & 0x07ff) as usize;
                 let length = ((pair & 0x0007) + 3) as usize;
-                if distance == 0 || distance > output.len() {
+                if distance == 0 || distance > (output.len() - record_start) {
                     return Err(AppError::BadRequest("referencia PalmDOC invalida".into()));
                 }
                 for _ in 0..length {
@@ -241,6 +241,13 @@ fn palmdoc_decompress(input: &[u8]) -> AppResult<Vec<u8>> {
             }
         }
     }
+    Ok(())
+}
+
+#[cfg(test)]
+fn palmdoc_decompress(input: &[u8]) -> AppResult<Vec<u8>> {
+    let mut output = Vec::with_capacity(input.len() * 2);
+    palmdoc_decompress_append(input, &mut output)?;
     Ok(output)
 }
 
@@ -248,27 +255,67 @@ fn strip_active_html(input: &str) -> String {
     // O iframe tambem recebe CSP sandbox. Esta remocao reduz conteudo ativo em leitores antigos.
     let mut output = input.to_string();
     for tag in ["script", "iframe", "object", "embed"] {
-        loop {
-            let lower = output.to_ascii_lowercase();
-            let Some(start) = lower.find(&format!("<{tag}")) else {
+        let open_tag = format!("<{tag}");
+        let close_tag = format!("</{tag}>");
+        let mut search_from = 0;
+        while search_from < output.len() {
+            let lower = output[search_from..].to_ascii_lowercase();
+            let Some(rel_start) = lower.find(&open_tag) else {
                 break;
             };
-            let Some(relative_end) = lower[start..].find(&format!("</{tag}>")) else {
-                output.truncate(start);
-                break;
-            };
-            let end = start + relative_end + tag.len() + 3;
-            output.replace_range(start..end, "");
+            let start = search_from + rel_start;
+            let after_tag = start + open_tag.len();
+            let delim = output.as_bytes().get(after_tag).copied();
+            if !matches!(delim, Some(b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')) {
+                search_from = after_tag;
+                continue;
+            }
+            if tag == "embed" {
+                if let Some(rel_gt) = lower[rel_start..].find('>') {
+                    let end = start + rel_gt + 1;
+                    output.replace_range(start..end, "");
+                    search_from = start;
+                } else {
+                    output.truncate(start);
+                    break;
+                }
+            } else {
+                let rel_gt = lower[rel_start..].find('>');
+                let is_self_closing = rel_gt.is_some_and(|gt| {
+                    let tag_slice = lower[rel_start..rel_start + gt].trim_end();
+                    tag_slice.ends_with('/')
+                });
+                if is_self_closing {
+                    let end = start + rel_gt.unwrap() + 1;
+                    output.replace_range(start..end, "");
+                    search_from = start;
+                    continue;
+                }
+                if let Some(rel_close) = lower[rel_start..].find(&close_tag) {
+                    let end = start + rel_close + close_tag.len();
+                    output.replace_range(start..end, "");
+                    search_from = start;
+                } else {
+                    output.truncate(start);
+                    break;
+                }
+            }
         }
     }
     output
 }
 
 fn escape_html(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    let mut output = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 fn validate_archive_path(path: &str) -> AppResult<()> {
@@ -393,13 +440,13 @@ fn natural_key(value: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut digits = None;
-    for character in value.to_ascii_lowercase().chars() {
+    for character in value.chars().map(|c| c.to_ascii_lowercase()) {
         let is_digit = character.is_ascii_digit();
         if digits.is_some_and(|previous| previous != is_digit) {
             if digits == Some(true) {
                 parts.push(format!("{:0>20}", current));
             } else {
-                parts.push(current.clone());
+                parts.push(std::mem::take(&mut current));
             }
             current.clear();
         }
@@ -437,6 +484,19 @@ mod tests {
     fn blocks_archive_traversal() {
         assert!(validate_archive_path("../outside").is_err());
         assert!(validate_archive_path("OPS/chapter.xhtml").is_ok());
+    }
+
+    #[test]
+    fn strips_active_html_without_truncating_void_elements() {
+        let input = "Capítulo 1: <embed src='audio.mp3'> Continuação do texto.";
+        assert_eq!(
+            strip_active_html(input),
+            "Capítulo 1:  Continuação do texto."
+        );
+        let script_test = "A <script>alert(1)</script> B <script src='x.js'/> C";
+        assert_eq!(strip_active_html(script_test), "A  B  C");
+        let safe_text = "Uma <scripture>passagem bíblica</scripture> não é script.";
+        assert_eq!(strip_active_html(safe_text), safe_text);
     }
 }
 
