@@ -180,7 +180,11 @@ where
     let mut candidates = Vec::new();
     let mut skipped = 0;
     let mut warnings = Vec::new();
-    for entry in WalkDir::new(&canonical_root).follow_links(false) {
+    for entry in WalkDir::new(&canonical_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| entry.file_name() != ".estante-trash")
+    {
         let entry = match entry {
             Ok(value) => value,
             Err(error) => {
@@ -349,6 +353,21 @@ fn partial_content_hash(path: &Path, size: u64) -> AppResult<String> {
         file.seek(SeekFrom::End(-(SAMPLE_SIZE as i64)))?;
         file.read_exact(&mut buffer)?;
         hasher.update(&buffer);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// SHA-256 integral, com buffer fixo, para confirmar candidatos antes da exclusao.
+pub fn full_content_hash(path: &Path) -> AppResult<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -563,9 +582,8 @@ fn read_zip_text(archive: &mut ZipArchive<File>, name: &str, max_size: u64) -> A
     if entry.size() > max_size {
         return Err(AppError::BadRequest("entrada EPUB grande demais".into()));
     }
-    let mut content = String::new();
-    entry.read_to_string(&mut content)?;
-    Ok(content)
+    let bytes = crate::bounded_io::read_limited(&mut entry, max_size)?;
+    String::from_utf8(bytes).map_err(|_| AppError::BadRequest("XML EPUB invalido".into()))
 }
 
 #[cfg(test)]
@@ -679,3 +697,7 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove fixture");
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/rust/full-hash.rs"]
+mod full_hash_tests;

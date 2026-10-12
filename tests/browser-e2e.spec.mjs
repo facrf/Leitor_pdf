@@ -74,10 +74,67 @@ test('cataloga, filtra, organiza, le, anota e cria backup pela interface', async
   await page.locator('#reading-desk-list [data-book-id]').first().click();
   await page.locator('#read-book').click();
   await expect(page.locator('#percent-input')).toHaveValue('37');
+  // A API de progresso falha, mas a fila local sobrevive ao reload.
+  await page.route('**/api/books/*/progress', route => route.abort('failed'));
+  await page.locator('#percent-input').fill('61');
+  await page.locator('#percent-input').dispatchEvent('change');
+  await page.evaluate(() => persistProgress());
+  await expect.poll(() => page.evaluate(async () => (await pendingProgress()).map(item => JSON.parse(item.body).percent))).toContain(61);
+  await page.locator('#reader-close').click();
+  await page.reload();
+  await expect.poll(() => page.evaluate(async () => (await pendingProgress()).length)).toBe(1);
+  await page.locator('#reading-desk-list [data-book-id]').first().click();
+  await page.locator('#read-book').click();
+  await expect(page.locator('#percent-input')).toHaveValue('61');
+  await page.unroute('**/api/books/*/progress');
+  await page.evaluate(() => retryPendingProgress());
+  await expect.poll(() => page.evaluate(async () => (await pendingProgress()).length)).toBe(0);
+  const savedPercent = await page.evaluate(async () => (await api(`/books/${state.currentBook.id}`)).book.progress.percent);
+  expect(savedPercent).toBe(61);
+
+  // Uma resposta antiga nao pode apagar uma posicao local gravada durante o envio.
+  let firstStarted, secondStarted, releaseFirst, releaseSecond;
+  const firstSeen = new Promise(resolve => { firstStarted = resolve; });
+  const secondSeen = new Promise(resolve => { secondStarted = resolve; });
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+  const secondGate = new Promise(resolve => { releaseSecond = resolve; });
+  await page.route('**/api/books/*/progress', async route => {
+    const percent = route.request().postDataJSON().percent;
+    if (percent === 70) { firstStarted(); await firstGate; }
+    if (percent === 75) { secondStarted(); await secondGate; }
+    await route.continue();
+  });
+  await page.evaluate(() => { state.reader.percent = 70; state.reader.location = { type: 'percent', percent: 70 }; persistProgress(); });
+  await firstSeen;
+  await page.evaluate(() => { state.reader.percent = 75; state.reader.location = { type: 'percent', percent: 75 }; persistProgress(); });
+  await expect.poll(() => page.evaluate(async () => (await pendingProgress()).map(item => JSON.parse(item.body).percent))).toEqual([75]);
+  releaseFirst();
+  await secondSeen;
+  expect(await page.evaluate(async () => (await pendingProgress()).map(item => JSON.parse(item.body).percent))).toEqual([75]);
+  releaseSecond();
+  await page.evaluate(() => state.progressSaveChain);
+  await page.unroute('**/api/books/*/progress');
+  expect(await page.evaluate(async () => (await pendingProgress()).length)).toBe(0);
+
+
   await page.locator('#reader-close').click();
   await expect(page.locator('#reader')).toBeHidden();
 
   await page.locator('#settings-button').click();
+  await page.locator('#duplicates-panel summary').click();
+  const duplicateButton = page.locator('[data-delete-book]').first();
+  const duplicateFilename = await duplicateButton.getAttribute('data-filename');
+  page.removeAllListeners('dialog');
+  page.on('dialog', dialog => dialog.accept(dialog.type() === 'prompt' ? duplicateFilename : undefined));
+  await duplicateButton.click();
+  await expect(page.locator('#trash-list [data-trash-restore]')).toHaveCount(1);
+  await page.getByText('Lixeira de livros', { exact: true }).click();
+  await page.locator('[data-trash-restore]').click();
+  await expect(page.locator('#trash-list [data-trash-restore]')).toHaveCount(0);
+  await page.getByText('Capas automáticas e OPDS', { exact: true }).click();
+  await page.locator('#preview-orphan-covers').click();
+  await expect(page.locator('#cover-cleanup-preview')).toHaveText('Nenhuma capa antiga sem referência.');
+  await expect(page.locator('#clean-orphan-covers')).toBeHidden();
   await page.locator('summary', { hasText: 'Backup e restauração' }).click();
   await page.locator('#create-backup').click();
   await expect(page.locator('#backup-list .backup-row')).toHaveCount(1);

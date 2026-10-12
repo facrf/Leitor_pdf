@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { rm } from 'node:fs/promises';
+import { rm, cp } from 'node:fs/promises';
 
 const testFile = process.argv[2];
 if (!testFile?.startsWith('tests/') || !testFile.endsWith('.mjs')) {
@@ -12,13 +12,14 @@ const label = authScenario ? 'auth' : 'api';
 const runtimeDirectory = `tests/runtime-data-${label}-ci`;
 const baseUrl = `http://127.0.0.1:${port}/api`;
 await rm(runtimeDirectory, { recursive: true, force: true });
+await cp('tests/fixtures/e2e', `${runtimeDirectory}/library`, { recursive: true });
 
 const server = spawn('cargo', ['run', '--locked'], {
   stdio: 'inherit',
   env: {
     ...process.env,
     APP_BIND: `127.0.0.1:${port}`,
-    LIBRARY_ROOT: 'tests/fixtures/e2e',
+    LIBRARY_ROOT: `${runtimeDirectory}/library`,
     DATABASE_PATH: `${runtimeDirectory}/library.db`,
     COVERS_DIR: `${runtimeDirectory}/covers`,
     BRANDING_DIR: `${runtimeDirectory}/branding`,
@@ -63,7 +64,7 @@ try {
   await waitForServer();
   const test = spawn(process.execPath, [testFile], {
     stdio: 'inherit',
-    env: { ...process.env, ESTANTE_E2E_URL: baseUrl },
+    env: { ...process.env, ESTANTE_E2E_URL: baseUrl, ESTANTE_E2E_RUNTIME_DIRECTORY: runtimeDirectory },
   });
   testExitCode = await new Promise(resolve => test.once('exit', code => resolve(code ?? 1)));
 } finally {

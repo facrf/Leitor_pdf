@@ -25,7 +25,7 @@ use crate::{
     covers,
     db::Database,
     error::{AppError, AppResult},
-    metadata,
+    maintenance, metadata,
     models::{
         CatalogQuery, CreateShare, MetadataCandidate, SaveCollection, SaveNote, SaveProgress,
         SaveProvider, UpdateBook,
@@ -105,6 +105,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/maintenance/health", get(library_health))
         .route("/maintenance/duplicates", get(list_duplicates))
+        .route("/maintenance/trash", get(list_trash))
+        .route("/maintenance/trash/{token}/restore", post(restore_trash))
+        .route(
+            "/maintenance/covers/orphans",
+            get(preview_orphan_covers).post(clean_orphan_covers),
+        )
         .route(
             "/maintenance/backups",
             get(list_backups).post(create_backup),
@@ -139,12 +145,29 @@ async fn coordinate_restore(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if request.method() == Method::POST && request.uri().path() == "/maintenance/restore" {
-        let _exclusive = gate.write().await;
-        next.run(request).await
+    let path = request.uri().path();
+    let exclusive = (request.method() == Method::POST
+        && (path == "/maintenance/restore"
+            || path == "/maintenance/covers/orphans"
+            || (path.starts_with("/maintenance/trash/") && path.ends_with("/restore"))))
+        || (request.method() == Method::DELETE
+            && path.starts_with("/books/")
+            && path.ends_with("/file"));
+    let exclusive = exclusive || (request.method() == Method::PUT && path == "/settings");
+    if exclusive {
+        tokio::spawn(async move {
+            let _exclusive = gate.write_owned().await;
+            next.run(request).await
+        })
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     } else {
-        let _shared = gate.read().await;
-        next.run(request).await
+        tokio::spawn(async move {
+            let _shared = gate.read_owned().await;
+            next.run(request).await
+        })
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     }
 }
 
@@ -186,6 +209,7 @@ async fn health() -> Json<Value> {
 
 #[derive(Serialize)]
 struct SettingsResponse {
+    catalog_id: String,
     library_root: String,
     network_metadata_enabled: bool,
     scan_profile: String,
@@ -229,6 +253,7 @@ fn default_carousel_interval() -> u64 {
 
 async fn get_settings(State(state): State<AppState>) -> AppResult<Json<SettingsResponse>> {
     Ok(Json(SettingsResponse {
+        catalog_id: state.db.setting("catalog_id").await?.unwrap_or_default(),
         library_root: library_root(&state).await?.to_string_lossy().into_owned(),
         network_metadata_enabled: network_enabled(&state).await?,
         scan_profile: configured_scan_profile(&state).await?.as_str().into(),
@@ -264,10 +289,7 @@ async fn save_settings(
         ));
     }
     let canonical = root.canonicalize()?;
-    state
-        .db
-        .set_setting("library_root", &canonical.to_string_lossy())
-        .await?;
+    state.db.set_library_root(&canonical).await?;
     state
         .db
         .set_setting(
@@ -778,6 +800,93 @@ async fn list_duplicates(State(state): State<AppState>) -> AppResult<Json<Value>
     Ok(Json(json!({ "groups": state.db.duplicates().await? })))
 }
 
+/// Recusa manutencao de arquivos durante tarefas que produzem ou catalogam recursos.
+fn ensure_maintenance_idle(state: &AppState) -> AppResult<()> {
+    if state
+        .scan_status
+        .lock()
+        .map_err(|error| AppError::Internal(error.to_string()))?
+        .running
+    {
+        return Err(AppError::BadRequest(
+            "aguarde a varredura ou geracao de capas terminar".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn list_trash(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    let root = library_root(&state).await?;
+    let items = tokio::task::spawn_blocking(move || maintenance::list_trash(&root))
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))??;
+    Ok(Json(json!({ "items": items })))
+}
+
+async fn restore_trash(
+    State(state): State<AppState>,
+    AxumPath(token): AxumPath<String>,
+) -> AppResult<Json<Value>> {
+    ensure_maintenance_idle(&state)?;
+    let root = library_root(&state).await?;
+    let item = tokio::task::spawn_blocking(move || maintenance::restore_trash(&root, &token))
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))??;
+    let current = state.db.book(item.book_id).await;
+    let matches_catalog = current
+        .as_ref()
+        .is_ok_and(|book| book.relative_path == item.relative_path);
+    if matches_catalog {
+        state.db.mark_available(item.book_id).await?;
+    }
+    Ok(Json(
+        json!({ "restored": true, "filename": item.filename, "rescan_needed": !matches_catalog }),
+    ))
+}
+
+async fn preview_orphan_covers(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    let references = state.db.referenced_covers().await?;
+    let directory = state.config.covers_dir;
+    let items =
+        tokio::task::spawn_blocking(move || maintenance::orphan_covers(&directory, &references))
+            .await
+            .map_err(|error| AppError::Internal(error.to_string()))??;
+    Ok(Json(json!({ "items": items, "retention_days": 7 })))
+}
+
+#[derive(Deserialize)]
+struct CleanOrphanCovers {
+    filenames: Vec<String>,
+}
+
+/// Revalida referencias e idade; remove somente os nomes selecionados na previa.
+async fn clean_orphan_covers(
+    State(state): State<AppState>,
+    Json(input): Json<CleanOrphanCovers>,
+) -> AppResult<Json<Value>> {
+    ensure_maintenance_idle(&state)?;
+    let references = state.db.referenced_covers().await?;
+    let directory = state.config.covers_dir;
+    let removed = tokio::task::spawn_blocking(move || -> AppResult<usize> {
+        let eligible = maintenance::orphan_covers(&directory, &references)?;
+        let eligible: std::collections::HashSet<_> =
+            eligible.into_iter().map(|item| item.filename).collect();
+        let requested: std::collections::HashSet<_> = input.filenames.into_iter().collect();
+        if requested.iter().any(|name| !eligible.contains(name)) {
+            return Err(AppError::BadRequest(
+                "a previa mudou; atualize antes de limpar".into(),
+            ));
+        }
+        for name in &requested {
+            std::fs::remove_file(directory.join(name))?;
+        }
+        Ok(requested.len())
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))??;
+    Ok(Json(json!({ "removed": removed })))
+}
+
 async fn update_book(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<i64>,
@@ -821,13 +930,54 @@ async fn delete_book_file(
         ));
     }
     let path = resolve_path(&state, &book.relative_path).await?;
-    tokio::fs::remove_file(&path).await?;
-    state.db.mark_unavailable(id).await?;
-    Ok(Json(json!({
-        "deleted": true,
-        "filename": book.filename,
-        "recoverable_from_application": false
-    })))
+    ensure_maintenance_idle(&state)?;
+    let candidates = state
+        .db
+        .duplicates()
+        .await?
+        .into_iter()
+        .find(|group| group.books.iter().any(|candidate| candidate.id == id))
+        .ok_or_else(|| AppError::BadRequest("o livro nao possui candidatos a duplicata".into()))?;
+    let root = library_root(&state).await?;
+    let root_for_hash = root.clone();
+    let confirmed = tokio::task::spawn_blocking(move || -> AppResult<bool> {
+        let hash = scanner::full_content_hash(&path)?;
+        for candidate in candidates
+            .books
+            .into_iter()
+            .filter(|candidate| candidate.id != id)
+        {
+            let other = scanner::resolve_book_path(&root_for_hash, &candidate.relative_path)?;
+            if other != path && scanner::full_content_hash(&other)? == hash {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))??;
+    if !confirmed {
+        return Err(AppError::BadRequest(
+            "os arquivos diferem na comparacao integral; exclusao recusada".into(),
+        ));
+    }
+    let filename = book.filename.clone();
+    let relative = book.relative_path;
+    let root_for_trash = root.clone();
+    let item = tokio::task::spawn_blocking(move || {
+        maintenance::trash(&root_for_trash, id, filename, relative)
+    })
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))??;
+    if let Err(error) = state.db.mark_unavailable(id).await {
+        let token = item.token.clone();
+        let rollback =
+            tokio::task::spawn_blocking(move || maintenance::restore_trash(&root, &token)).await;
+        tracing::warn!(?rollback, "rollback da lixeira apos falha no banco");
+        return Err(error);
+    }
+    Ok(Json(json!({ "deleted": true, "filename": book.filename,
+        "recoverable_from_application": true, "trash_token": item.token })))
 }
 
 async fn book_cover(
@@ -858,8 +1008,17 @@ struct FileQuery {
 async fn save_progress(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<i64>,
+    headers: HeaderMap,
     Json(input): Json<SaveProgress>,
 ) -> AppResult<Json<Value>> {
+    if let Some(catalog_id) = headers.get("x-catalog-id") {
+        let current = state.db.setting("catalog_id").await?.unwrap_or_default();
+        if catalog_id.to_str().ok() != Some(current.as_str()) {
+            return Err(AppError::BadRequest(
+                "catalogo alterado; recarregue a biblioteca antes de sincronizar".into(),
+            ));
+        }
+    }
     state.db.book(id).await?;
     state.db.save_progress(id, &input).await?;
     Ok(Json(json!({ "saved": true })))
@@ -1499,10 +1658,26 @@ async fn stream_file(
 ) -> AppResult<Response> {
     let mut file = tokio::fs::File::open(&path).await?;
     let size = file.metadata().await?.len();
-    let range = headers
+    let range_header = headers
         .get(header::RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| parse_range(value, size));
+        .and_then(|value| value.to_str().ok());
+    let range = range_header.and_then(|value| parse_range(value, size));
+    if range_header.is_some_and(|value| is_unsatisfiable_range(value, size)) {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+        response.headers_mut().insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes */{size}"))
+                .map_err(|error| AppError::Internal(error.to_string()))?,
+        );
+        response
+            .headers_mut()
+            .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+        response
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        return Ok(response);
+    }
     let (status, start, end) = range
         .map(|(start, end)| (StatusCode::PARTIAL_CONTENT, start, end))
         .unwrap_or((StatusCode::OK, 0, size.saturating_sub(1)));
@@ -1599,6 +1774,28 @@ fn percent_encode_header_param(value: &str) -> String {
         }
     }
     encoded
+}
+
+/// Intervalos simples validos sem intersecao recebem 416; sintaxe desconhecida e ignorada.
+fn is_unsatisfiable_range(value: &str, size: u64) -> bool {
+    let Some(value) = value.strip_prefix("bytes=") else {
+        return false;
+    };
+    let Some((start, end)) = value.split_once('-') else {
+        return false;
+    };
+    if start.is_empty() {
+        return end
+            .parse::<u64>()
+            .is_ok_and(|suffix| suffix == 0 || size == 0);
+    }
+    let Ok(start) = start.parse::<u64>() else {
+        return false;
+    };
+    if !end.is_empty() && !end.parse::<u64>().is_ok_and(|end| end >= start) {
+        return false;
+    }
+    start >= size
 }
 
 fn parse_range(value: &str, size: u64) -> Option<(u64, u64)> {
@@ -1705,3 +1902,7 @@ mod tests {
         assert!(value_dl.contains("filename*=UTF-8''Mem%C3%B3rias.epub"));
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/rust/range-regression.rs"]
+mod range_regression;

@@ -8,9 +8,7 @@ fn fixture_database() -> Database {
     for id in 1..=205 {
         conn.execute("INSERT INTO books(id,title,filename,relative_path,format,size,modified_at,created_at,updated_at) VALUES(?1,'Same title',?2,?2,'txt',1,1,'now','now')", params![id, format!("book-{id}.txt")]).unwrap();
     }
-    Database {
-        connection: Arc::new(Mutex::new(conn)),
-    }
+    Database::from_connection(conn).unwrap()
 }
 
 #[tokio::test]
@@ -93,8 +91,7 @@ async fn accepted_notes_and_progress_pass_restore_validation() {
     )
     .await
     .unwrap();
-    let conn = db.connection.lock().await;
-    validate_restore_data(&conn).unwrap();
+    db.run(|conn| validate_restore_data(conn)).await.unwrap();
 }
 
 #[tokio::test]
@@ -149,8 +146,7 @@ async fn providers_reject_private_or_internal_addresses() {
 #[tokio::test]
 async fn facets_extract_subjects_and_years_correctly() {
     let db = fixture_database();
-    {
-        let conn = db.connection.lock().await;
+    db.run(|conn| {
         conn.execute(
             "UPDATE books SET subjects = '[\"Ficção\", \"Aventura\"]', published_date = '1984-05-12' WHERE id = 1",
             [],
@@ -159,7 +155,8 @@ async fn facets_extract_subjects_and_years_correctly() {
             "UPDATE books SET subjects = '[\"Ficção\", \"Drama\"]', published_date = '2001' WHERE id = 2",
             [],
         ).unwrap();
-    }
+        Ok(())
+    }).await.unwrap();
     let facets = db.catalog_facets().await.unwrap();
     assert_eq!(facets.subjects, vec!["Aventura", "Drama", "Ficção"]);
     assert_eq!(facets.years, vec!["2001", "1984"]);

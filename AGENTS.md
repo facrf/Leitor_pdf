@@ -70,3 +70,15 @@ Este documento estabelece as regras de escopo, segurança, boas práticas e limi
   o Docker precisa copiar essa pasta antes de executar `cargo test`.
 - A autenticação exige ambas as credenciais ou ambas vazias. Geração de capas respeita
   `COVER_TIMEOUT_SECONDS` (1–600, padrão 60) e encerra o renderizador ao exceder o prazo.
+
+## 8. Manutenção e persistência
+
+- Execute SQL pela fila do worker dedicado (`Database::run`); não bloqueie threads Tokio com SQLite.
+- Limites ZIP devem contar bytes reais descompactados, além dos tamanhos declarados.
+- Exclusão de originais exige confirmação integral contra outra cópia e preservação na lixeira.
+  Ignore `.estante-trash/` na varredura; não inclua originais em backups nem no Git.
+- Coleta de capas é explícita, precedida de prévia, e conserva referências de todos os livros,
+  arquivos com menos de sete dias, links e subpastas. Revalide antes de remover.
+- Progresso usa IndexedDB antes da rede e confirmação por versão. Preserve isolamento por
+  catálogo/raiz, validação de `X-Catalog-Id` e troca de identificação após restauração ou mudança de raiz.
+- Travas de manutenção devem sobreviver à desconexão HTTP até a operação terminar.

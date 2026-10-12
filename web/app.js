@@ -145,10 +145,24 @@ function renderReadingDesk() {
 
 async function removeFromDesk(id) {
   try {
-    await api(`/books/${id}/progress`, { method: 'DELETE' });
+    const remove = async () => {
+      const pending = (await pendingProgress()).find(item => item.bookId === id);
+      await api(`/books/${id}/progress`, { method: 'DELETE' });
+      if (pending) await progressTransaction((store, done) => {
+        const request = store.get(pending.key);
+        request.onsuccess = () => {
+          if (request.result?.version === pending.version) store.delete(pending.key);
+          done();
+        };
+      });
+      if (globalThis.indexedDB) await updateProgressSyncStatus();
+    };
+    state.progressSaveChain = state.progressSaveChain.then(() => globalThis.navigator?.locks
+      ? navigator.locks.request('estante-progress-sync', remove) : remove());
+    await state.progressSaveChain;
     toast('Livro retirado da mesa de leitura.');
     await Promise.all([loadReadingDesk(), loadBooks()]);
-  } catch (error) { toast(error.message, true); }
+  } catch (error) { state.progressSaveChain = Promise.resolve(); toast(error.message, true); }
 }
 
 async function loadSuggestions() {
@@ -318,7 +332,12 @@ async function openReader(book) {
   clearInterval(state.carouselTimer);
   state.carouselTimer = null;
   state.currentBook = book;
-  state.reader = { kind: book.format, location: book.progress?.location || {}, percent: book.progress?.percent || 0, items: [] };
+  let progress = book.progress;
+  try {
+    const pending = (await pendingProgress()).find(item => item.bookId === book.id);
+    if (pending) progress = JSON.parse(pending.body);
+  } catch (error) { toast(`Fila local indisponível: ${error.message}`, true); }
+  state.reader = { kind: book.format, location: progress?.location || {}, percent: progress?.percent || 0, items: [] };
   if (!state.reader.percent) state.reader.percent = book.page_count ? Math.min(99, 100 / book.page_count) : 0.1;
   $('#reader-title').textContent = book.title;
   $('#reader-download').href = `/api/books/${book.id}/file?download=true`;
@@ -398,16 +417,119 @@ function scheduleProgressSave(immediate = false) {
   state.progressSaveTimer = setTimeout(persistProgress, immediate ? 0 : 700);
 }
 
-/** Captura livro/posicao agora e serializa as gravacoes, inclusive ao fechar. */
+// Uma entrada por livro e biblioteca; a confirmacao so remove a versao enviada.
+let progressDatabase;
+function openProgressDatabase() {
+  if (!globalThis.indexedDB) return Promise.resolve(null);
+  if (!progressDatabase) progressDatabase = new Promise((resolve, reject) => {
+    const request = indexedDB.open('estante-progress', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('pending', { keyPath: 'key' });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => { progressDatabase = null; reject(request.error); };
+    request.onblocked = () => { progressDatabase = null; reject(new Error('Armazenamento local bloqueado')); };
+  });
+  return progressDatabase;
+}
+
+function progressScope() { return JSON.stringify([state.settings?.catalog_id || '', state.settings?.library_root || '']); }
+
+/** A transacao le e altera a fila atomicamente, inclusive entre abas. */
+async function progressTransaction(operation) {
+  const database = await openProgressDatabase();
+  if (!database) return null;
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction('pending', 'readwrite');
+    const store = transaction.objectStore('pending');
+    let result;
+    operation(store, value => { result = value; });
+    transaction.oncomplete = () => resolve(result);
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error || new Error('Fila local cancelada'));
+  });
+}
+
+async function pendingProgress() {
+  const scope = progressScope();
+  return (await progressTransaction((store, done) => {
+    const request = store.getAll();
+    request.onsuccess = () => done(request.result.filter(item => item.scope === scope));
+  })) || [];
+}
+
+async function sendPendingProgress() {
+  const items = await pendingProgress();
+  let failed;
+  for (const item of items) {
+    try {
+      await api(`/books/${item.bookId}/progress`, { method: 'PUT', body: item.body, keepalive: true, headers: item.catalogId ? { 'X-Catalog-Id': item.catalogId } : {} });
+    } catch (error) { failed = error; continue; }
+    await progressTransaction((store, done) => {
+      const request = store.get(item.key);
+      request.onsuccess = () => {
+        if (request.result?.version === item.version) store.delete(item.key);
+        done();
+      };
+    });
+  }
+  await updateProgressSyncStatus();
+  if (failed) throw failed;
+}
+
+async function updateProgressSyncStatus() {
+  const count = (await pendingProgress()).length;
+  for (const selector of ['#progress-sync-status', '#reader-sync-status']) {
+    const target = $(selector);
+    if (target) target.textContent = count ? `Progresso pendente de ${count} livro(s)` : '';
+  }
+}
+
+/** Coordena envios entre abas quando Web Locks esta disponivel. */
+function syncPendingProgress() {
+  if (globalThis.navigator?.locks) return navigator.locks.request('estante-progress-sync', sendPendingProgress);
+  return sendPendingProgress();
+}
+
+/** Grava localmente antes da rede; captura o livro antes de qualquer espera. */
 function persistProgress() {
   clearTimeout(state.progressSaveTimer);
   state.progressSaveTimer = null;
   if (!state.currentBook) return Promise.resolve();
   const bookId = state.currentBook.id;
   const body = JSON.stringify({ location: state.reader.location, percent: state.reader.percent });
-  state.progressSaveChain = state.progressSaveChain.then(() =>
-    api(`/books/${bookId}/progress`, { method: 'PUT', body, keepalive: true })
-  ).catch(error => { toast(`Progresso não salvo: ${error.message}`, true); });
+  const scope = progressScope();
+  const item = { key: JSON.stringify([scope, bookId]), scope, bookId, body, catalogId: state.settings?.catalog_id || '',
+    createdAt: Date.now(), version: `${Date.now()}-${Math.random()}` };
+  // Inicia a gravacao agora, mesmo quando um envio anterior ainda esta aguardando.
+  let storageError;
+  const stored = progressTransaction((store, done) => {
+    const request = store.get(item.key);
+    request.onsuccess = () => {
+      if (!request.result || (request.result.createdAt || 0) <= item.createdAt) store.put(item);
+      done();
+    };
+  });
+  const durable = stored.catch(error => { storageError = error; });
+  state.progressSaveChain = state.progressSaveChain.then(async () => {
+    await durable;
+    if (globalThis.indexedDB && !storageError) await updateProgressSyncStatus();
+    if (!globalThis.indexedDB || storageError) {
+      await api(`/books/${bookId}/progress`, { method: 'PUT', body, keepalive: true,
+        headers: item.catalogId ? { 'X-Catalog-Id': item.catalogId } : {} });
+      if (storageError) toast('Progresso salvo no servidor; a fila local está indisponível.', true);
+    } else {
+      await syncPendingProgress();
+    }
+  }).catch(error => {
+    const message = storageError || !globalThis.indexedDB
+      ? `Progresso não salvo: ${error.message}. Armazenamento local indisponível.`
+      : `Progresso pendente: ${error.message}. Nova tentativa ao reconectar.`;
+    toast(message, true);
+  });
+  return state.progressSaveChain;
+}
+
+function retryPendingProgress() {
+  state.progressSaveChain = state.progressSaveChain.then(syncPendingProgress).catch(() => {});
   return state.progressSaveChain;
 }
 
@@ -483,12 +605,13 @@ async function deleteCollection(row) {
 
 async function loadMaintenance() {
   try {
-    const [{ health }, { groups }, { backups }] = await Promise.all([
-      api('/maintenance/health'), api('/maintenance/duplicates'), api('/maintenance/backups'),
+    const [{ health }, { groups }, { backups }, { items }] = await Promise.all([
+      api('/maintenance/health'), api('/maintenance/duplicates'), api('/maintenance/backups'), api('/maintenance/trash'),
     ]);
     renderHealth(health);
     renderDuplicates(groups);
     renderBackups(backups);
+    renderTrash(items);
   } catch (error) { toast(`Manutenção: ${error.message}`, true); }
 }
 
@@ -520,15 +643,45 @@ function renderDuplicates(groups) {
 
 async function deleteDuplicateFile(button) {
   const filename = button.dataset.filename;
-  const confirmation = prompt(`Esta operação apaga o arquivo original e não pode ser desfeita pelo aplicativo.\n\nPara confirmar, digite exatamente:\n${filename}`);
+  const confirmation = prompt(`O conteúdo completo será comparado com outra cópia. O arquivo irá para a lixeira e poderá ser restaurado.\n\nPara confirmar, digite exatamente:\n${filename}`);
   if (confirmation !== filename) {
     if (confirmation !== null) toast('Nome diferente: exclusão cancelada.', true);
     return;
   }
   try {
     await api(`/books/${button.dataset.deleteBook}/file`, { method: 'DELETE', body: JSON.stringify({ filename }) });
-    toast(`Arquivo ${filename} excluído. Não é recuperável pelo aplicativo.`);
+    toast(`Arquivo ${filename} movido para a lixeira.`);
     await Promise.all([loadMaintenance(), loadBooks()]);
+  } catch (error) { toast(error.message, true); }
+}
+
+function renderTrash(items) {
+  $('#trash-list').innerHTML = items.length ? items.map(item => `<article class="backup-row"><div><strong>${escapeHtml(item.filename)}</strong><small>${escapeHtml(item.relative_path)}</small></div><button class="button ghost small" type="button" data-trash-restore="${escapeHtml(item.token)}">Restaurar</button></article>`).join('') : '<p class="detail-description">A lixeira está vazia.</p>';
+  $$('[data-trash-restore]').forEach(button => button.onclick = async () => {
+    try {
+      const result = await api(`/maintenance/trash/${button.dataset.trashRestore}/restore`, { method: 'POST' });
+      toast(result.rescan_needed ? 'Arquivo restaurado. Clique em Atualizar para catalogá-lo.' : 'Arquivo restaurado.');
+      await Promise.all([loadMaintenance(), loadBooks()]);
+    } catch (error) { toast(error.message, true); }
+  });
+}
+
+async function previewCoverCleanup() {
+  try {
+    const { items, retention_days: days } = await api('/maintenance/covers/orphans');
+    $('#cover-cleanup-preview').textContent = items.length
+      ? `${items.length} capa(s), ${formatBytes(items.reduce((sum, item) => sum + item.size, 0))}. Sem referência e com pelo menos ${days} dias. Arquivos: ${items.map(item => item.filename).join(', ')}`
+      : 'Nenhuma capa antiga sem referência.';
+    const button = $('#clean-orphan-covers');
+    button.classList.toggle('hidden', !items.length);
+    button.onclick = async () => {
+      if (!confirm(`Remover definitivamente ${items.length} capa(s) listadas na prévia?`)) return;
+      try {
+        const { removed } = await api('/maintenance/covers/orphans', { method: 'POST', body: JSON.stringify({ filenames: items.map(item => item.filename) }) });
+        toast(`${removed} capa(s) removida(s).`);
+        await previewCoverCleanup();
+      } catch (error) { toast(error.message, true); }
+    };
   } catch (error) { toast(error.message, true); }
 }
 
@@ -707,6 +860,9 @@ function encodePath(path) { return path.split('/').map(encodeURIComponent).join(
 
 document.addEventListener('DOMContentLoaded', async () => {
   await Promise.all([loadSettings(), loadBooks(), loadReadingDesk()]);
+  retryPendingProgress();
+  window.addEventListener('online', retryPendingProgress);
+  setInterval(retryPendingProgress, 15000);
   pollScanStatus();
   $('#search').addEventListener('input', event => { clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadBooks(event.target.value), 220); });
   document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) { event.preventDefault(); $('#search').focus(); } if (event.key === 'Escape' && !$('#reader').classList.contains('hidden')) closeReader(); });
@@ -734,9 +890,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#collection-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const payload = Object.fromEntries(new FormData(form)); try { await api('/collections', { method: 'POST', body: JSON.stringify(payload) }); form.reset(); form.elements.color.value = '#6e816a'; await Promise.all([loadSettings(), loadBooks()]); toast('Coleção criada.'); } catch (error) { toast(error.message, true); } };
   $('#refresh-health').onclick = loadMaintenance; $('#create-backup').onclick = createBackup;
   $('#restore-input').onchange = event => restoreBackup(event.target.files[0]);
+  $('#preview-orphan-covers').onclick = previewCoverCleanup;
   $('#generate-covers').onclick = generateCovers; $('#opds-import-form').onsubmit = importOpds;
   $('#reader-close').onclick = closeReader; $('#notes-toggle').onclick = () => $('#notes-panel').classList.toggle('open'); $('#notes-close').onclick = () => $('#notes-panel').classList.remove('open');
   $('#note-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const content = new FormData(form).get('content'); try { await api(`/books/${state.currentBook.id}/notes`, { method: 'POST', body: JSON.stringify({ content, location: state.reader.location }) }); form.reset(); loadNotes(); toast('Anotação salva nesta posição.'); } catch (error) { toast(error.message, true); } };
   window.addEventListener('pagehide', flushProgressOnPageExit);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushProgressOnPageExit(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushProgressOnPageExit(); else retryPendingProgress(); });
 });

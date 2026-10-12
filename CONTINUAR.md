@@ -1,3 +1,69 @@
+# Checkpoint — 2026-10-12
+
+## Revisão atual — seis melhorias autorizadas
+
+Implementação concluída. O usuário autorizou documentação, commit e push nesta sessão.
+O resultado do envio deve ser conferido no relatório final e no estado atual do Git.
+Nenhuma imagem Docker foi construída ou publicada manualmente nesta revisão.
+
+### Mudanças
+
+1. `bounded_io`: limites de bytes reais nas leituras ZIP de EPUB/CBZ, indexação e
+   extração de backups (total extraído de até 2 GiB), além dos limites declarados.
+2. Exclusão de duplicatas exige SHA-256 integral contra outra cópia e confirmação do nome.
+   Originais ficam em `.estante-trash/` na raiz da biblioteca; interface lista/restaura,
+   sem sobrescrita. Varredura e Git ignoram a lixeira; backups não incluem originais.
+3. Progresso usa IndexedDB antes da rede, confirmação por versão e reenvio ao carregar,
+   reconectar, voltar à aba e a cada 15 segundos. Web Locks coordena envios quando disponível.
+   A fila é separada por catálogo/raiz; `X-Catalog-Id` recusa envios de abas antigas após
+   restauração ou troca de raiz. Falhas de um livro não impedem os demais.
+4. SQLite usa thread dedicada, conexão única e fila limitada a 64 operações aguardando.
+   As travas de manutenção permanecem até o handler terminar, mesmo com desconexão HTTP.
+5. Intervalos simples não satisfazíveis recebem 416, corpo vazio e `Content-Range` adequado.
+   Sintaxes não suportadas e múltiplos intervalos continuam ignorados.
+6. Prévia e limpeza explícita de capas sem referências e com ao menos sete dias.
+   Referências de livros indisponíveis são preservadas; links/subpastas são ignorados.
+   A remoção revalida nomes/idade/referências e aguarda outros handlers.
+
+README.md e AGENTS.md atualizados com arquitetura, contratos, uso e limitações.
+Os servidores E2E usam cópias isoladas de fixtures em suas pastas de runtime.
+
+### Verificações realmente executadas
+
+- cargo fmt --check: passou após formatação final.
+- cargo clippy --locked --all-targets -- -D warnings: passou.
+- cargo test --locked: 39 passaram, 0 falharam, 1 teste de volume ignorado.
+- cargo test --locked indexes_2287_files -- --ignored: passou (2.287 arquivos).
+- npm run test:ui: passou (sintaxe, IDs/layouts e ordem de gravação).
+- npm run test:api: passou, incluindo falso positivo de duplicatas, lixeira/restauração,
+  Range 416/206, limpeza efetiva de capa antiga e recusa de progresso de catálogo anterior.
+- npm run test:auth: passou, incluindo proteção das novas rotas e configuração parcial.
+- npm run test:browser: passou, incluindo falha de rede/reload, confirmação de versão
+  durante envio pendente, exclusão/restauração pela lixeira e prévia de limpeza.
+  Uma execução intermediária falhou por seletor de teste incorreto; corrigido e reexecutado.
+- git diff --check: passou.
+
+### Limitações
+
+- IndexedDB não garante a última mudança se a aba fechar antes da transação local concluir.
+  Limpar dados do navegador remove pendências. Falha de armazenamento usa tentativa direta
+  de rede com aviso. Leitura dos livros ainda requer acesso ao servidor.
+- Pendências de um catálogo anterior ficam isoladas no navegador e não são reaplicadas.
+- SQLite continua serializado; operações longas ainda fazem outras consultas aguardar.
+- Lixeira requer links físicos no mesmo filesystem; submontagens ou sistemas sem suporte
+  falham preservando o original. A pasta original precisa existir para restaurar.
+  Sem expurgo automático e sem transação durável conjunta entre arquivos e banco.
+- Mudanças externas simultâneas no acervo não são coordenadas pela aplicação.
+- Capas removidas pela limpeza são excluídas definitivamente; backups anteriores conservam cópias.
+- Sem benchmark em acervo privado real ou construção Docker nesta revisão.
+
+Sem pendências de implementação na solicitação atual. Para retomar, leia AGENTS.md,
+confira git status/git diff e use tests/with-local-tools.sh com caches dentro do projeto.
+
+---
+
+## Histórico anterior
+
 # Checkpoint — 2026-10-10
 
 ## Tarefa atual — verificação do código em busca de melhorias e otimizações

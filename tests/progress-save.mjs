@@ -25,7 +25,7 @@ vm.runInContext(`
   state.currentBook = { id: 2 };
   state.reader = { location: { page: 9 }, percent: 90 };
 `, context);
-await Promise.resolve();
+await new Promise(resolve => setTimeout(resolve, 0));
 assert.equal(calls.length, 1, 'segunda gravacao deve aguardar a primeira');
 let finished = false;
 context.lastSave.then(() => { finished = true; });

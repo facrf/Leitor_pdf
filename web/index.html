@@ -121,7 +121,7 @@
   </main>
 
   <footer class="site-footer">
-    <span>Acervo privado, feito para durar.</span>
+    <span>Acervo privado, feito para durar.</span><span id="progress-sync-status" aria-live="polite"></span>
     <a href="https://www.fabianocesar.com" target="_blank" rel="noreferrer">Desenvolvido por FACRF.</a>
   </footer>
 
@@ -196,6 +196,7 @@
     <section class="provider-section maintenance-section">
       <div class="section-title"><div><h3>Saúde e manutenção</h3><p>Diagnóstico local do catálogo e operações administrativas.</p></div><button class="button ghost small" id="refresh-health" type="button">Atualizar painel</button></div>
       <div id="health-grid" class="health-grid"><p class="detail-description">Abra o painel para carregar o diagnóstico.</p></div>
+      <details class="admin-disclosure"><summary>Lixeira de livros</summary><p class="detail-description">Originais preservados na pasta da biblioteca. Restauração não sobrescreve arquivos existentes. A lixeira não entra no backup do catálogo.</p><div id="trash-list" class="backup-list"></div></details>
       <details class="admin-disclosure" id="duplicates-panel"><summary>Duplicatas para revisar <b id="duplicate-count">0</b></summary><div id="duplicate-list" class="duplicate-list"></div></details>
       <details class="admin-disclosure"><summary>Backup e restauração</summary>
         <div class="admin-disclosure-body">
@@ -206,7 +207,7 @@
       </details>
       <details class="admin-disclosure"><summary>Capas automáticas e OPDS</summary>
         <div class="admin-disclosure-body">
-          <div class="maintenance-actions"><button class="button ghost small" id="generate-covers" type="button">Gerar capas pendentes</button><a class="button ghost small" href="/api/opds" target="_blank">Abrir catálogo OPDS</a></div>
+          <div class="maintenance-actions"><button class="button ghost small" id="preview-orphan-covers" type="button">Revisar capas antigas</button><button class="button danger small hidden" id="clean-orphan-covers" type="button">Limpar capas da prévia</button><button class="button ghost small" id="generate-covers" type="button">Gerar capas pendentes</button><a class="button ghost small" href="/api/opds" target="_blank">Abrir catálogo OPDS</a></div><p id="cover-cleanup-preview" class="detail-description" aria-live="polite"></p>
           <form id="opds-import-form" class="inline-admin-form"><input name="url" type="url" required placeholder="https://servidor/catalog.xml"><button class="button primary small" type="submit">Importar livros do OPDS</button></form>
           <small>A importação exige rede habilitada e só ocorre após confirmação explícita.</small>
         </div>
@@ -230,7 +231,7 @@
   <section id="reader" class="reader hidden" aria-label="Leitor">
     <header class="reader-bar">
       <button class="icon-button light" id="reader-close" aria-label="Voltar à estante">←</button>
-      <div class="reader-book"><strong id="reader-title"></strong><small id="reader-location"></small></div>
+      <div class="reader-book"><strong id="reader-title"></strong><small id="reader-location"></small><small id="reader-sync-status" aria-live="polite"></small></div>
       <div id="reader-navigation" class="reader-navigation"></div>
       <button class="button light" id="notes-toggle" type="button">✎ <span class="desktop-label">Anotações</span></button>
       <a class="icon-button light" id="reader-download" aria-label="Baixar livro">⇩</a>

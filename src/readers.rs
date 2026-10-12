@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::Read,
     path::{Component, Path, PathBuf},
 };
 
@@ -94,8 +93,7 @@ pub fn archive_resource(
             "recurso compactado invalido ou grande demais".into(),
         ));
     }
-    let mut bytes = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut bytes)?;
+    let bytes = crate::bounded_io::read_limited(&mut entry, max_size)?;
     let mime = mime_guess::from_path(resource)
         .first_or_octet_stream()
         .to_string();
@@ -395,8 +393,7 @@ fn archive_resource_from(
             "entrada compactada grande demais".into(),
         ));
     }
-    let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes)?;
+    let bytes = crate::bounded_io::read_limited(&mut entry, limit)?;
     Ok((
         bytes,
         mime_guess::from_path(name)

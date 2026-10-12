@@ -7,7 +7,7 @@ Biblioteca digital privada e offline-first para PDF, EPUB, MOBI/AZW, CBZ e livro
 - Cataloga recursivamente `pdf`, `epub`, `mobi`, `azw`, `azw3`, `cbz`, `txt`, `md`, `html`, `htm` e `fb2`.
 - Lê PDF pelo visualizador nativo do navegador; EPUB por capítulos; CBZ por páginas; MOBI/AZW clássico e texto em um leitor isolado.
 - Salva página/capítulo/percentual de leitura e anotações no SQLite.
-- As mudanças pelos controles do leitor são salvas após 700 ms e ao fechar o leitor. Ao ocultar/sair da aba, há uma tentativa adicional com `keepalive`, sem garantia em caso de encerramento abrupto ou falta de rede. PDF usa a página informada nos controles da aplicação (não acompanha o visualizador nativo); texto/MOBI usa o percentual manual.
+- As mudanças pelos controles do leitor são salvas após 700 ms e ao fechar o leitor. A posição é gravada primeiro em IndexedDB e reenviada ao abrir a aplicação, reconectar, voltar à aba e a cada 15 segundos. Ao ocultar/sair da aba, há uma tentativa adicional com `keepalive`; encerramento antes de concluir a gravação local ainda pode perder a última mudança. PDF usa a página informada nos controles da aplicação (não acompanha o visualizador nativo); texto/MOBI usa o percentual manual.
 - Reúne automaticamente livros iniciados em **Minha mesa de leitura** e permite retirá-los dela sem apagar o arquivo.
 - Filtra por formato, autor, assunto, coleção, editora, idioma, ano, tamanho, disponibilidade e progresso; ordena por título, autor, ano, atualização, tamanho ou leitura.
 - Organiza livros em coleções coloridas editáveis, sem mover os arquivos no disco.
@@ -15,7 +15,7 @@ Biblioteca digital privada e offline-first para PDF, EPUB, MOBI/AZW, CBZ e livro
 - Reaproveita metadados e assinatura de arquivos cujo tamanho e data não mudaram, tornando as atualizações seguintes incrementais.
 - Oferece perfis econômico, equilibrado e completo para controlar o impacto de CPU e disco.
 - Rejeita metadados PDF corrompidos e usa o nome legível do arquivo como título seguro.
-- Localiza prováveis duplicatas pela assinatura SHA-256 de amostras do conteúdo e exige a digitação exata do nome antes de apagar um original.
+- Localiza prováveis duplicatas pela assinatura SHA-256 de amostras do conteúdo; exige o nome exato e confirma o SHA-256 integral contra outra cópia antes de mover o original para uma lixeira recuperável.
 - Exibe um painel de saúde com arquivos ausentes, campos incompletos, capas pendentes, duplicatas e avisos da última varredura.
 - Exibe, quando ativado pelo administrador, um carrossel aleatório formado somente por livros locais.
 - Permite trocar ou excluir logo, favicon e imagem de abertura, armazenados localmente.
@@ -256,7 +256,7 @@ Sem Docker, ajuste `LIBRARY_ROOT` e mantenha `DATABASE_PATH`/`COVERS_DIR` em cam
 
 O serviço continua sendo uma biblioteca de usuário único. Quando `AUTH_USERNAME` e `AUTH_PASSWORD` estão ambos preenchidos, todas as rotas da API exigem HTTP Basic, exceto saúde e links públicos por token. Definir apenas uma credencial impede a inicialização; o usuário não pode conter dois-pontos. A interface aciona o diálogo nativo de credenciais do navegador. HTTP Basic não cifra a senha: fora da máquina local, use VPN ou proxy reverso com HTTPS e nunca publique a porta 20000 diretamente.
 
-Excluir uma duplicata remove o arquivo original da pasta e não há lixeira interna; a interface exige repetir exatamente o nome. Backups administrativos não incluem os livros, portanto mantenha também uma cópia separada de `/pdf`.
+Excluir uma duplicata confirma o conteúdo integral e move o original para `.estante-trash/` dentro da raiz da biblioteca. A interface exige repetir o nome e permite restaurar sem sobrescrever arquivos. Backups administrativos não incluem os livros, portanto mantenha também uma cópia separada de `/pdf`.
 
 Para acesso remoto, não exponha diretamente `20000`. Use VPN ou o exemplo documentado de [proxy reverso com HTTPS](docs/https.md).
 
@@ -277,5 +277,54 @@ permitem CSS local/inline, mantendo scripts e conexões bloqueados.
 Aplicar metadados prepara a capa antes de gravar título e referência da imagem juntos;
 falhas de validação, consentimento ou download preservam os dados anteriores.
 Capas novas têm nomes únicos; capas antigas são conservadas para evitar interferência
-com downloads e backups em andamento. Não há coleta automática dessas imagens antigas.
+com downloads e backups em andamento. A coleta é manual, com prévia, retenção de sete dias e revalidação das referências antes de remover.
 Cada renderização PDF tem prazo configurável e encerra o processo ao excedê-lo.
+
+### Robustez, progresso e manutenção local
+
+As leituras ZIP de EPUB/CBZ e da indexação limitam os bytes efetivamente descompactados,
+além de verificar os tamanhos declarados. A restauração limita a soma dos bytes gravados
+a 2 GiB e conserva o limite de 10.000 entradas. Os limites existentes por recurso continuam válidos.
+
+SQLite utiliza uma thread dedicada e uma fila de até 64 operações aguardando execução.
+Consultas, varreduras em lote, snapshots e restauração não executam SQL nas threads assíncronas
+que atendem HTTP. A conexão continua única: consultas ainda podem aguardar uma operação longa,
+enquanto saúde HTTP e tarefas sem banco permanecem independentes.
+As operações HTTP conservam a trava de manutenção até terminar mesmo se o cliente desconectar.
+
+A fila de progresso guarda a última posição por livro, catálogo e raiz da biblioteca.
+Uma confirmação só remove a versão enviada; posições mais recentes permanecem pendentes.
+Quando disponível, Web Locks coordena o envio entre abas. O servidor valida `X-Catalog-Id`
+para recusar reenvios de abas antigas depois de restaurar um backup ou trocar a raiz.
+Clientes antigos sem esse cabeçalho continuam compatíveis. Pendências do catálogo anterior
+permanecem no armazenamento do navegador, mas não são reaplicadas ao catálogo novo.
+Falhas permanentes de um livro não impedem o envio dos demais. IndexedDB depende da origem
+e do perfil do navegador: limpar seus dados remove a fila; se o armazenamento falhar, há aviso
+e tentativa de gravação direta no servidor. A aplicação ainda exige acesso ao servidor para abrir livros.
+
+Em **Configurações → Lixeira de livros**, restaure originais removidos. A restauração exige que
+a pasta original ainda exista e não substitui arquivos. A lixeira fica na mesma raiz e usa links
+físicos para mover sem sobrescrever: filesystems sem esse suporte ou livros em submontagens de
+outro filesystem fazem a operação falhar preservando o original. A varredura ignora `.estante-trash/`.
+Não há expurgo automático; originais na lixeira continuam ocupando espaço.
+Backups do catálogo não incluem lixeira nem livros originais; mantenha uma cópia da pasta de livros.
+Mudanças externas simultâneas nos arquivos e quedas do sistema não têm uma transação conjunta
+com SQLite; uma nova varredura reconcilia a disponibilidade do catálogo.
+
+Em **Configurações → Capas automáticas e OPDS → Revisar capas antigas**, confira nomes, quantidade e espaço recuperável.
+A limpeza remove apenas os nomes da prévia ainda elegíveis, sem referências de nenhum livro
+(inclusive indisponíveis), com pelo menos sete dias de idade. Links simbólicos e subpastas
+são ignorados. A remoção é definitiva; backups já criados conservam suas próprias imagens.
+Limpeza, exclusão e restauração de livros são recusadas durante varredura ou geração de capas.
+
+| Rota adicional | Comportamento |
+|---|---|
+| `GET /api/maintenance/trash` | Lista originais recuperáveis |
+| `POST /api/maintenance/trash/{token}/restore` | Restaura sem sobrescrever; informa `rescan_needed` se o livro não corresponde ao catálogo |
+| `GET /api/maintenance/covers/orphans` | Prévia das capas elegíveis e retenção em dias |
+| `POST /api/maintenance/covers/orphans` | Recebe `{"filenames":["capa.png"]}` e revalida antes de remover |
+
+`DELETE /api/books/{id}/file` mantém a confirmação `{"filename":"livro.txt"}`,
+mas agora exige uma duplicata integral e retorna `recoverable_from_application: true` e `trash_token`.
+Intervalos simples válidos fora do arquivo recebem `416` com `Content-Range: bytes */tamanho`;
+intervalos múltiplos ou com sintaxe não suportada continuam sendo ignorados, com resposta completa.

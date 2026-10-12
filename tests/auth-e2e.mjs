@@ -9,6 +9,10 @@ const denied = await fetch(`${baseUrl}/settings`);
 assert.equal(denied.status, 401);
 assert.match(denied.headers.get('www-authenticate'), /^Basic /);
 
+for (const route of ['/maintenance/trash', '/maintenance/covers/orphans']) {
+  assert.equal((await fetch(`${baseUrl}${route}`)).status, 401);
+}
+
 const invalid = await fetch(`${baseUrl}/settings`, {
   headers: { Authorization: `Basic ${Buffer.from('facrf:senha-errada').toString('base64')}` },
 });

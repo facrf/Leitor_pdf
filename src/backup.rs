@@ -322,6 +322,7 @@ fn extract_package(archive_path: &Path, destination: &Path) -> AppResult<()> {
         return Err(AppError::BadRequest("backup contem entradas demais".into()));
     }
     let mut total = 0_u64;
+    let mut actual_total = 0_u64;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index)?;
         total = total.saturating_add(entry.size());
@@ -349,7 +350,11 @@ fn extract_package(archive_path: &Path, destination: &Path) -> AppResult<()> {
             std::fs::create_dir_all(parent)?;
         }
         let mut file = File::create(output)?;
-        std::io::copy(&mut entry, &mut file)?;
+        actual_total += crate::bounded_io::copy_limited(
+            &mut entry,
+            &mut file,
+            2 * 1024 * 1024 * 1024 - actual_total,
+        )?;
         file.flush()?;
     }
     Ok(())

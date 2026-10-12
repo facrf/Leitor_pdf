@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     error::{AppError, AppResult},
@@ -14,9 +14,12 @@ use crate::{
     scanner::{metadata_looks_corrupt, sanitize_metadata_text, KnownBook, ScannedBook},
 };
 
+type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
+
+/// Uma thread dedicada serializa SQLite sem bloquear o executor HTTP.
 #[derive(Clone)]
 pub struct Database {
-    connection: Arc<Mutex<Connection>>,
+    sender: Arc<mpsc::Sender<DatabaseJob>>,
 }
 
 impl Database {
@@ -24,305 +27,399 @@ impl Database {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let connection = open_connection(path)?;
-        connection.execute(
-            "INSERT OR IGNORE INTO settings (key, value) VALUES ('library_root', ?1)",
-            [initial_library_root.to_string_lossy().as_ref()],
-        )?;
-        connection.execute(
-            "INSERT OR IGNORE INTO settings (key, value) VALUES ('network_metadata_enabled', 'false')",
-            [],
-        )?;
-        for (key, value) in [
-            ("scan_profile", "economical"),
-            ("carousel_enabled", "false"),
-            ("carousel_interval_seconds", "12"),
-            ("auto_cover_enabled", "false"),
-        ] {
+        let path = path.to_path_buf();
+        let initial_library_root = initial_library_root.to_path_buf();
+        let connection = tokio::task::spawn_blocking(move || -> AppResult<Connection> {
+            let connection = open_connection(&path)?;
+            connection.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('catalog_id',?1)", [format!("{:032x}", rand::random::<u128>())])?;
             connection.execute(
-                "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
-                params![key, value],
+                "INSERT OR IGNORE INTO settings (key, value) VALUES ('library_root', ?1)",
+                [initial_library_root.to_string_lossy().as_ref()],
             )?;
-        }
-        connection.execute(
-            "INSERT OR IGNORE INTO metadata_providers (id, name, kind, base_url, enabled, builtin)
-             VALUES (1, 'Open Library', 'open_library', 'https://openlibrary.org', 1, 1)",
-            [],
-        )?;
-        connection.execute(
-            "INSERT OR IGNORE INTO metadata_providers (id, name, kind, base_url, enabled, builtin)
-             VALUES (2, 'Google Books', 'google_books', 'https://www.googleapis.com/books/v1', 1, 1)",
-            [],
-        )?;
-        for (name, color) in [
-            ("Favoritos", "#d75d36"),
-            ("Para estudar", "#52758f"),
-            ("Ler depois", "#6e816a"),
-        ] {
             connection.execute(
-                "INSERT OR IGNORE INTO collections (name, color, created_at) VALUES (?1, ?2, ?3)",
-                params![name, color, Utc::now().to_rfc3339()],
+                "INSERT OR IGNORE INTO settings (key, value) VALUES ('network_metadata_enabled', 'false')",
+                [],
             )?;
-        }
+            for (key, value) in [
+                ("scan_profile", "economical"),
+                ("carousel_enabled", "false"),
+                ("carousel_interval_seconds", "12"),
+                ("auto_cover_enabled", "false"),
+            ] {
+                connection.execute(
+                    "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+                    params![key, value],
+                )?;
+            }
+            connection.execute(
+                "INSERT OR IGNORE INTO metadata_providers (id, name, kind, base_url, enabled, builtin)
+                 VALUES (1, 'Open Library', 'open_library', 'https://openlibrary.org', 1, 1)",
+                [],
+            )?;
+            connection.execute(
+                "INSERT OR IGNORE INTO metadata_providers (id, name, kind, base_url, enabled, builtin)
+                 VALUES (2, 'Google Books', 'google_books', 'https://www.googleapis.com/books/v1', 1, 1)",
+                [],
+            )?;
+            for (name, color) in [
+                ("Favoritos", "#d75d36"),
+                ("Para estudar", "#52758f"),
+                ("Ler depois", "#6e816a"),
+            ] {
+                connection.execute(
+                    "INSERT OR IGNORE INTO collections (name, color, created_at) VALUES (?1, ?2, ?3)",
+                    params![name, color, Utc::now().to_rfc3339()],
+                )?;
+            }
+            Ok(connection)
+        }).await.map_err(|error| AppError::Internal(error.to_string()))??;
+        Self::from_connection(connection)
+    }
+
+    /// Transfere a conexao para uma unica thread com fila limitada.
+    fn from_connection(connection: Connection) -> AppResult<Self> {
+        let (sender, mut receiver) = mpsc::channel::<DatabaseJob>(64);
+        std::thread::Builder::new()
+            .name("sqlite-worker".into())
+            .spawn(move || {
+                let mut connection = connection;
+                while let Some(job) = receiver.blocking_recv() {
+                    job(&mut connection);
+                }
+            })?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            sender: Arc::new(sender),
         })
     }
 
+    /// Enfileira uma operacao com dados proprios e aguarda seu resultado.
+    async fn run<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> AppResult<T> + Send + 'static,
+    ) -> AppResult<T> {
+        let (reply, result) = oneshot::channel();
+        self.sender
+            .send(Box::new(move |connection| {
+                let _ = reply.send(operation(connection));
+            }))
+            .await
+            .map_err(|_| AppError::Internal("worker SQLite encerrado".into()))?;
+        result
+            .await
+            .map_err(|_| AppError::Internal("worker SQLite sem resposta".into()))?
+    }
+
+    /// Troca a raiz e a identificacao da fila local em uma unica transacao.
+    pub async fn set_library_root(&self, root: &Path) -> AppResult<()> {
+        let root = root.to_string_lossy().into_owned();
+        self.run(move |conn| {
+            let previous: String = conn.query_row(
+                "SELECT value FROM settings WHERE key='library_root'",
+                [],
+                |row| row.get(0),
+            )?;
+            let tx = conn.transaction()?;
+            if previous != root {
+                tx.execute(
+                    "UPDATE settings SET value=?1 WHERE key='catalog_id'",
+                    [format!("{:032x}", rand::random::<u128>())],
+                )?;
+            }
+            tx.execute(
+                "UPDATE settings SET value=?1 WHERE key='library_root'",
+                [root],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Referencias de todos os livros, inclusive indisponiveis, protegem suas capas.
+    pub async fn referenced_covers(&self) -> AppResult<std::collections::HashSet<String>> {
+        self.run(|conn| {
+            let mut statement =
+                conn.prepare("SELECT cover_filename FROM books WHERE cover_filename IS NOT NULL")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        })
+        .await
+    }
+
+    pub async fn mark_available(&self, id: i64) -> AppResult<()> {
+        self.run(move |conn| {
+            conn.execute("UPDATE books SET is_available=1 WHERE id=?1", [id])?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn snapshot_to(&self, destination: &Path) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        conn.execute("VACUUM INTO ?1", [destination.to_string_lossy().as_ref()])?;
-        Ok(())
+        let destination = destination.to_path_buf();
+        self.run(move |conn| {
+            conn.execute("VACUUM INTO ?1", [destination.to_string_lossy().as_ref()])?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn replace_from(&self, source: &Path) -> AppResult<()> {
-        let candidate = Connection::open(source)?;
-        let integrity: String =
-            candidate.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-        if integrity != "ok" {
-            return Err(AppError::BadRequest(format!(
-                "o banco do backup falhou na verificacao de integridade: {integrity}"
-            )));
-        }
-        let has_books: bool = candidate.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='books')",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_books {
-            return Err(AppError::BadRequest(
-                "o pacote nao contem um catalogo Estante Livre valido".into(),
-            ));
-        }
-        validate_restore_schema(&candidate)?;
-        drop(candidate);
+        let source = source.to_path_buf();
+        self.run(move |conn| {
 
-        let mut conn = self.connection.lock().await;
-        // O source e a copia extraida do ZIP. Migre antes de copiar para o
-        // destino. SQLite faz commit apenas ao concluir; Drop aborta se falhar.
-        let candidate = open_connection(source)?;
-        validate_restore_data(&candidate)?;
-        // Estes valores descrevem esta instalacao e seu consentimento de rede.
-        for key in ["library_root", "network_metadata_enabled"] {
-            let value: String =
-                conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
-                    row.get(0)
-                })?;
-            candidate.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
-        }
-        let backup = rusqlite::backup::Backup::new(&candidate, &mut conn)?;
-        match backup.step(-1)? {
-            rusqlite::backup::StepResult::Done => Ok(()),
-            _ => Err(AppError::BadRequest(
-                "banco ocupado; tente restaurar novamente".into(),
-            )),
-        }
+            let candidate = Connection::open(&source)?;
+            let integrity: String =
+                candidate.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                return Err(AppError::BadRequest(format!(
+                    "o banco do backup falhou na verificacao de integridade: {integrity}"
+                )));
+            }
+            let has_books: bool = candidate.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='books')",
+                [],
+                |row| row.get(0),
+            )?;
+            if !has_books {
+                return Err(AppError::BadRequest(
+                    "o pacote nao contem um catalogo Estante Livre valido".into(),
+                ));
+            }
+            validate_restore_schema(&candidate)?;
+            drop(candidate);
+
+            // O source e a copia extraida do ZIP. Migre antes de copiar para o
+            // destino. SQLite faz commit apenas ao concluir; Drop aborta se falhar.
+            let candidate = open_connection(&source)?;
+            validate_restore_data(&candidate)?;
+            // Estes valores descrevem esta instalacao e seu consentimento de rede.
+            for key in ["library_root", "network_metadata_enabled"] {
+                let value: String =
+                    conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
+                        row.get(0)
+                    })?;
+                candidate.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
+            }
+            candidate.execute("INSERT INTO settings(key,value) VALUES('catalog_id',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [format!("{:032x}", rand::random::<u128>())])?;
+            let backup = rusqlite::backup::Backup::new(&candidate, conn)?;
+            match backup.step(-1)? {
+                rusqlite::backup::StepResult::Done => Ok(()),
+                _ => Err(AppError::BadRequest(
+                    "banco ocupado; tente restaurar novamente".into(),
+                )),
+            }
+        }).await
     }
 
     pub async fn setting(&self, key: &str) -> AppResult<Option<String>> {
-        let conn = self.connection.lock().await;
-        Ok(conn
-            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
-                row.get(0)
-            })
-            .optional()?)
+        let key = key.to_owned();
+        self.run(move |conn| {
+            let key = key.as_str();
+            Ok(conn
+                .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                    row.get(0)
+                })
+                .optional()?)
+        })
+        .await
     }
 
     pub async fn set_setting(&self, key: &str, value: &str) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        conn.execute(
-            "INSERT INTO settings (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
-        Ok(())
+        let key = key.to_owned();
+        let value = value.to_owned();
+        self.run(move |conn| {
+            let key = key.as_str();
+            let value = value.as_str();
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn delete_setting(&self, key: &str) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
-        Ok(())
+        let key = key.to_owned();
+        self.run(move |conn| {
+            let key = key.as_str();
+            conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn scan_index(&self) -> AppResult<HashMap<String, KnownBook>> {
-        let conn = self.connection.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT relative_path, title, author, size, modified_at, page_count, content_hash, metadata_scanned
-             FROM books",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                KnownBook {
-                    title: row.get(1)?,
-                    author: row.get(2)?,
-                    size: row.get(3)?,
-                    modified_at: row.get(4)?,
-                    page_count: row.get(5)?,
-                    content_hash: row.get(6)?,
-                    metadata_scanned: row.get(7)?,
-                },
-            ))
-        })?;
-        Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+        self.run(move |conn| {
+
+            let mut stmt = conn.prepare(
+                "SELECT relative_path, title, author, size, modified_at, page_count, content_hash, metadata_scanned
+                 FROM books",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    KnownBook {
+                        title: row.get(1)?,
+                        author: row.get(2)?,
+                        size: row.get(3)?,
+                        modified_at: row.get(4)?,
+                        page_count: row.get(5)?,
+                        content_hash: row.get(6)?,
+                        metadata_scanned: row.get(7)?,
+                    },
+                ))
+            })?;
+            Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+        }).await
     }
 
     pub async fn sync_scan(&self, books: &[ScannedBook]) -> AppResult<(usize, usize, usize)> {
-        let mut conn = self.connection.lock().await;
-        let tx = conn.transaction()?;
-        tx.execute("UPDATE books SET is_available = 0", [])?;
-        let mut added = 0;
-        let mut updated = 0;
-        let mut unchanged = 0;
-        let now = Utc::now().to_rfc3339();
-        let mut select_stmt = tx.prepare("SELECT title FROM books WHERE relative_path=?1")?;
-        let mut upsert_stmt = tx.prepare(
-            "INSERT INTO books (title, author, filename, relative_path, format, size, modified_at,
-              page_count, content_hash, is_available, created_at, updated_at, metadata_scanned)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?10, ?13)
-             ON CONFLICT(relative_path) DO UPDATE SET filename=excluded.filename, format=excluded.format,
-              size=excluded.size, modified_at=excluded.modified_at, page_count=COALESCE(excluded.page_count, books.page_count),
-              content_hash=COALESCE(excluded.content_hash, books.content_hash),
-              title=CASE WHEN ?11 OR (books.metadata_edited=0 AND excluded.metadata_scanned=1)
-                    THEN excluded.title ELSE books.title END,
-              author=CASE WHEN ?11 OR (books.metadata_edited=0 AND excluded.metadata_scanned=1)
-                    THEN COALESCE(excluded.author, books.author) ELSE books.author END,
-              metadata_scanned=excluded.metadata_scanned,
-              is_available=1,
-              updated_at=CASE WHEN ?12 THEN books.updated_at ELSE excluded.updated_at END",
-        )?;
-        for book in books {
-            let existing_title: Option<String> = select_stmt
-                .query_row([&book.relative_path], |row| row.get(0))
-                .optional()?;
-            let repair_metadata = existing_title
-                .as_deref()
-                .map(metadata_looks_corrupt)
-                .unwrap_or(false);
-            upsert_stmt.execute(params![
-                book.title,
-                book.author,
-                book.filename,
-                book.relative_path,
-                book.format,
-                book.size,
-                book.modified_at,
-                book.page_count,
-                book.content_hash,
-                now,
-                repair_metadata,
-                book.unchanged,
-                book.metadata_scanned,
-            ])?;
-            if existing_title.is_none() {
-                added += 1;
-            } else if book.unchanged {
-                unchanged += 1;
-            } else {
-                updated += 1;
+        let books = books.to_vec();
+        self.run(move |conn| {
+                let books = books.as_slice();
+            let tx = conn.transaction()?;
+            tx.execute("UPDATE books SET is_available = 0", [])?;
+            let mut added = 0;
+            let mut updated = 0;
+            let mut unchanged = 0;
+            let now = Utc::now().to_rfc3339();
+            let mut select_stmt = tx.prepare("SELECT title FROM books WHERE relative_path=?1")?;
+            let mut upsert_stmt = tx.prepare(
+                "INSERT INTO books (title, author, filename, relative_path, format, size, modified_at,
+                  page_count, content_hash, is_available, created_at, updated_at, metadata_scanned)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?10, ?13)
+                 ON CONFLICT(relative_path) DO UPDATE SET filename=excluded.filename, format=excluded.format,
+                  size=excluded.size, modified_at=excluded.modified_at, page_count=COALESCE(excluded.page_count, books.page_count),
+                  content_hash=COALESCE(excluded.content_hash, books.content_hash),
+                  title=CASE WHEN ?11 OR (books.metadata_edited=0 AND excluded.metadata_scanned=1)
+                        THEN excluded.title ELSE books.title END,
+                  author=CASE WHEN ?11 OR (books.metadata_edited=0 AND excluded.metadata_scanned=1)
+                        THEN COALESCE(excluded.author, books.author) ELSE books.author END,
+                  metadata_scanned=excluded.metadata_scanned,
+                  is_available=1,
+                  updated_at=CASE WHEN ?12 THEN books.updated_at ELSE excluded.updated_at END",
+            )?;
+            for book in books {
+                let existing_title: Option<String> = select_stmt
+                    .query_row([&book.relative_path], |row| row.get(0))
+                    .optional()?;
+                let repair_metadata = existing_title
+                    .as_deref()
+                    .map(metadata_looks_corrupt)
+                    .unwrap_or(false);
+                upsert_stmt.execute(params![
+                    book.title,
+                    book.author,
+                    book.filename,
+                    book.relative_path,
+                    book.format,
+                    book.size,
+                    book.modified_at,
+                    book.page_count,
+                    book.content_hash,
+                    now,
+                    repair_metadata,
+                    book.unchanged,
+                    book.metadata_scanned,
+                ])?;
+                if existing_title.is_none() {
+                    added += 1;
+                } else if book.unchanged {
+                    unchanged += 1;
+                } else {
+                    updated += 1;
+                }
             }
-        }
-        drop(select_stmt);
-        drop(upsert_stmt);
-        tx.commit()?;
-        Ok((added, updated, unchanged))
+            drop(select_stmt);
+            drop(upsert_stmt);
+            tx.commit()?;
+            Ok((added, updated, unchanged))
+        }).await
     }
 
     pub async fn save_scan_issues(&self, warnings: &[String]) -> AppResult<()> {
-        let mut conn = self.connection.lock().await;
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM scan_issues", [])?;
-        let now = Utc::now().to_rfc3339();
-        let mut insert_stmt =
-            tx.prepare("INSERT INTO scan_issues (path, message, created_at) VALUES (?1, ?2, ?3)")?;
-        for warning in warnings {
-            let (path, message) = warning
-                .split_once(": ")
-                .unwrap_or(("varredura", warning.as_str()));
-            insert_stmt.execute(params![path, message, now])?;
-        }
-        drop(insert_stmt);
-        tx.commit()?;
-        Ok(())
+        let warnings = warnings.to_vec();
+        self.run(move |conn| {
+            let warnings = warnings.as_slice();
+            let tx = conn.transaction()?;
+            tx.execute("DELETE FROM scan_issues", [])?;
+            let now = Utc::now().to_rfc3339();
+            let mut insert_stmt = tx.prepare(
+                "INSERT INTO scan_issues (path, message, created_at) VALUES (?1, ?2, ?3)",
+            )?;
+            for warning in warnings {
+                let (path, message) = warning
+                    .split_once(": ")
+                    .unwrap_or(("varredura", warning.as_str()));
+                insert_stmt.execute(params![path, message, now])?;
+            }
+            drop(insert_stmt);
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     /// Retorna uma pagina e seu total filtrado, com limite de 1 a 200 livros.
     pub async fn list_books(&self, query: &CatalogQuery) -> AppResult<CatalogPage> {
-        let limit = query.limit.unwrap_or(60);
-        if !(1..=200).contains(&limit) {
-            return Err(AppError::BadRequest(
-                "limit deve ficar entre 1 e 200".into(),
-            ));
-        }
-        let offset = query.offset.unwrap_or(0);
-        let conn = self.connection.lock().await;
-        let search = format!("%{}%", query.q.as_deref().unwrap_or_default().trim());
-        let format = query.format.as_deref().unwrap_or_default().trim();
-        let author = query.author.as_deref().unwrap_or_default().trim();
-        let subject = query.subject.as_deref().unwrap_or_default().trim();
-        let publisher = query.publisher.as_deref().unwrap_or_default().trim();
-        let language = query.language.as_deref().unwrap_or_default().trim();
-        let year = format!("{}%", query.year.as_deref().unwrap_or_default().trim());
-        let progress = query.progress.as_deref().unwrap_or_default().trim();
-        let availability = query.availability.as_deref().unwrap_or_default().trim();
-        let order = match query.sort.as_deref() {
-            Some("author") => "COALESCE(b.author, '') COLLATE NOCASE, b.title COLLATE NOCASE",
-            Some("year") => "COALESCE(b.published_date, '') DESC, b.title COLLATE NOCASE",
-            Some("recent") => "b.updated_at DESC",
-            Some("size") => "b.size DESC",
-            Some("progress") => "COALESCE(p.percent, 0) DESC, b.title COLLATE NOCASE",
-            _ => "b.title COLLATE NOCASE",
-        };
-        let filter_sql = "FROM books b LEFT JOIN reading_progress p ON p.book_id = b.id
-             WHERE (?1 = '%%' OR b.title LIKE ?1 OR COALESCE(b.author, '') LIKE ?1
-                    OR b.filename LIKE ?1 OR b.subjects LIKE ?1)
-               AND (?2 = '' OR b.format = ?2)
-               AND (?3 = '' OR COALESCE(b.author, '') = ?3 COLLATE NOCASE)
-               AND (?4 = '' OR EXISTS (
-                    SELECT 1 FROM json_each(b.subjects) WHERE value = ?4 COLLATE NOCASE
-               ))
-               AND (?5 = '' OR COALESCE(b.publisher, '') = ?5 COLLATE NOCASE)
-               AND (?6 = '' OR COALESCE(b.language, '') = ?6 COLLATE NOCASE)
-               AND (?7 = '%' OR COALESCE(b.published_date, '') LIKE ?7)
-               AND (?8 IS NULL OR b.size >= ?8)
-               AND (?9 IS NULL OR b.size <= ?9)
-               AND (?10 = '' OR (?10 = 'unread' AND COALESCE(p.percent, 0) = 0)
-                    OR (?10 = 'reading' AND p.percent > 0 AND p.percent < 100)
-                    OR (?10 = 'finished' AND p.percent >= 100))
-               AND (?11 = '' OR (?11 = 'available' AND b.is_available = 1)
-                    OR (?11 = 'missing' AND b.is_available = 0))
-               AND (?12 IS NULL OR EXISTS (
-                    SELECT 1 FROM collection_books cb
-                    WHERE cb.book_id = b.id AND cb.collection_id = ?12
-               ))";
-        let sql = format!(
-            "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
-                    b.publisher, b.published_date, b.language, b.size, b.is_available,
-                    b.cover_filename IS NOT NULL, COALESCE(p.percent, 0), b.updated_at
-             {filter_sql} ORDER BY {order}, b.id"
-        );
-        let parameters = params![
-            search,
-            format,
-            author,
-            subject,
-            publisher,
-            language,
-            year,
-            query.min_size,
-            query.max_size,
-            progress,
-            availability,
-            query.collection_id,
-        ];
-        let total = conn.query_row(
-            &format!("SELECT COUNT(*) {filter_sql}"),
-            parameters,
-            |row| row.get(0),
-        )?;
-        let mut stmt = conn.prepare(&format!("{sql} LIMIT ?13 OFFSET ?14"))?;
-        let rows = stmt.query_map(
-            params![
+        let query = query.clone();
+        self.run(move |conn| {
+            let query = &query;
+            let limit = query.limit.unwrap_or(60);
+            if !(1..=200).contains(&limit) {
+                return Err(AppError::BadRequest(
+                    "limit deve ficar entre 1 e 200".into(),
+                ));
+            }
+            let offset = query.offset.unwrap_or(0);
+            let search = format!("%{}%", query.q.as_deref().unwrap_or_default().trim());
+            let format = query.format.as_deref().unwrap_or_default().trim();
+            let author = query.author.as_deref().unwrap_or_default().trim();
+            let subject = query.subject.as_deref().unwrap_or_default().trim();
+            let publisher = query.publisher.as_deref().unwrap_or_default().trim();
+            let language = query.language.as_deref().unwrap_or_default().trim();
+            let year = format!("{}%", query.year.as_deref().unwrap_or_default().trim());
+            let progress = query.progress.as_deref().unwrap_or_default().trim();
+            let availability = query.availability.as_deref().unwrap_or_default().trim();
+            let order = match query.sort.as_deref() {
+                Some("author") => "COALESCE(b.author, '') COLLATE NOCASE, b.title COLLATE NOCASE",
+                Some("year") => "COALESCE(b.published_date, '') DESC, b.title COLLATE NOCASE",
+                Some("recent") => "b.updated_at DESC",
+                Some("size") => "b.size DESC",
+                Some("progress") => "COALESCE(p.percent, 0) DESC, b.title COLLATE NOCASE",
+                _ => "b.title COLLATE NOCASE",
+            };
+            let filter_sql = "FROM books b LEFT JOIN reading_progress p ON p.book_id = b.id
+                 WHERE (?1 = '%%' OR b.title LIKE ?1 OR COALESCE(b.author, '') LIKE ?1
+                        OR b.filename LIKE ?1 OR b.subjects LIKE ?1)
+                   AND (?2 = '' OR b.format = ?2)
+                   AND (?3 = '' OR COALESCE(b.author, '') = ?3 COLLATE NOCASE)
+                   AND (?4 = '' OR EXISTS (
+                        SELECT 1 FROM json_each(b.subjects) WHERE value = ?4 COLLATE NOCASE
+                   ))
+                   AND (?5 = '' OR COALESCE(b.publisher, '') = ?5 COLLATE NOCASE)
+                   AND (?6 = '' OR COALESCE(b.language, '') = ?6 COLLATE NOCASE)
+                   AND (?7 = '%' OR COALESCE(b.published_date, '') LIKE ?7)
+                   AND (?8 IS NULL OR b.size >= ?8)
+                   AND (?9 IS NULL OR b.size <= ?9)
+                   AND (?10 = '' OR (?10 = 'unread' AND COALESCE(p.percent, 0) = 0)
+                        OR (?10 = 'reading' AND p.percent > 0 AND p.percent < 100)
+                        OR (?10 = 'finished' AND p.percent >= 100))
+                   AND (?11 = '' OR (?11 = 'available' AND b.is_available = 1)
+                        OR (?11 = 'missing' AND b.is_available = 0))
+                   AND (?12 IS NULL OR EXISTS (
+                        SELECT 1 FROM collection_books cb
+                        WHERE cb.book_id = b.id AND cb.collection_id = ?12
+                   ))";
+            let sql = format!(
+                "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
+                        b.publisher, b.published_date, b.language, b.size, b.is_available,
+                        b.cover_filename IS NOT NULL, COALESCE(p.percent, 0), b.updated_at
+                 {filter_sql} ORDER BY {order}, b.id"
+            );
+            let parameters = params![
                 search,
                 format,
                 author,
@@ -335,337 +432,393 @@ impl Database {
                 progress,
                 availability,
                 query.collection_id,
+            ];
+            let total = conn.query_row(
+                &format!("SELECT COUNT(*) {filter_sql}"),
+                parameters,
+                |row| row.get(0),
+            )?;
+            let mut stmt = conn.prepare(&format!("{sql} LIMIT ?13 OFFSET ?14"))?;
+            let rows = stmt.query_map(
+                params![
+                    search,
+                    format,
+                    author,
+                    subject,
+                    publisher,
+                    language,
+                    year,
+                    query.min_size,
+                    query.max_size,
+                    progress,
+                    availability,
+                    query.collection_id,
+                    limit,
+                    offset,
+                ],
+                row_to_summary,
+            )?;
+            Ok(CatalogPage {
+                books: rows.collect::<Result<Vec<_>, _>>()?,
+                total,
                 limit,
                 offset,
-            ],
-            row_to_summary,
-        )?;
-        Ok(CatalogPage {
-            books: rows.collect::<Result<Vec<_>, _>>()?,
-            total,
-            limit,
-            offset,
+            })
         })
+        .await
     }
 
     pub async fn reading_desk(&self) -> AppResult<Vec<BookSummary>> {
-        let conn = self.connection.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
-                    b.publisher, b.published_date, b.language, b.size, b.is_available,
-                    b.cover_filename IS NOT NULL, p.percent, b.updated_at
-             FROM books b JOIN reading_progress p ON p.book_id = b.id
-             WHERE b.is_available=1 AND p.percent > 0 AND p.percent < 100
-             ORDER BY p.updated_at DESC",
-        )?;
-        let rows = stmt.query_map([], row_to_summary)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
+                        b.publisher, b.published_date, b.language, b.size, b.is_available,
+                        b.cover_filename IS NOT NULL, p.percent, b.updated_at
+                 FROM books b JOIN reading_progress p ON p.book_id = b.id
+                 WHERE b.is_available=1 AND p.percent > 0 AND p.percent < 100
+                 ORDER BY p.updated_at DESC",
+            )?;
+            let rows = stmt.query_map([], row_to_summary)?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
     }
 
     pub async fn suggestions(&self, limit: usize) -> AppResult<Vec<BookSummary>> {
-        let conn = self.connection.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
-                    b.publisher, b.published_date, b.language, b.size, b.is_available,
-                    b.cover_filename IS NOT NULL, COALESCE(p.percent, 0), b.updated_at
-             FROM books b LEFT JOIN reading_progress p ON p.book_id = b.id
-             WHERE b.is_available=1
-             ORDER BY RANDOM() LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([limit.clamp(1, 20) as i64], row_to_summary)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
+                        b.publisher, b.published_date, b.language, b.size, b.is_available,
+                        b.cover_filename IS NOT NULL, COALESCE(p.percent, 0), b.updated_at
+                 FROM books b LEFT JOIN reading_progress p ON p.book_id = b.id
+                 WHERE b.is_available=1
+                 ORDER BY RANDOM() LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit.clamp(1, 20) as i64], row_to_summary)?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
     }
 
     pub async fn catalog_facets(&self) -> AppResult<CatalogFacets> {
-        let conn = self.connection.lock().await;
-        let mut formats = Vec::new();
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT format FROM books WHERE is_available=1 ORDER BY format COLLATE NOCASE",
-        )?;
-        for value in stmt.query_map([], |row| row.get(0))? {
-            formats.push(value?);
-        }
+        self.run(move |conn| {
+                let mut formats = Vec::new();
+                let mut stmt = conn.prepare(
+                "SELECT DISTINCT format FROM books WHERE is_available=1 ORDER BY format COLLATE NOCASE",
+            )?;
+                for value in stmt.query_map([], |row| row.get(0))? {
+                    formats.push(value?);
+                }
 
-        let mut authors = Vec::new();
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT author FROM books WHERE is_available=1 AND author IS NOT NULL
-             AND TRIM(author) <> '' ORDER BY author COLLATE NOCASE",
-        )?;
-        for value in stmt.query_map([], |row| row.get(0))? {
-            authors.push(value?);
-        }
+                let mut authors = Vec::new();
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT author FROM books WHERE is_available=1 AND author IS NOT NULL
+                 AND TRIM(author) <> '' ORDER BY author COLLATE NOCASE",
+                )?;
+                for value in stmt.query_map([], |row| row.get(0))? {
+                    authors.push(value?);
+                }
 
-        let mut subjects = Vec::new();
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT TRIM(value) FROM books, json_each(books.subjects)
-             WHERE is_available=1 AND json_valid(books.subjects) AND TRIM(value) <> ''
-             ORDER BY TRIM(value) COLLATE NOCASE",
-        )?;
-        for value in stmt.query_map([], |row| row.get(0))? {
-            subjects.push(value?);
-        }
-        let mut publishers = Vec::new();
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT publisher FROM books WHERE is_available=1 AND publisher IS NOT NULL
-             AND TRIM(publisher) <> '' ORDER BY publisher COLLATE NOCASE",
-        )?;
-        for value in stmt.query_map([], |row| row.get(0))? {
-            publishers.push(value?);
-        }
-        let mut languages = Vec::new();
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT language FROM books WHERE is_available=1 AND language IS NOT NULL
-             AND TRIM(language) <> '' ORDER BY language COLLATE NOCASE",
-        )?;
-        for value in stmt.query_map([], |row| row.get(0))? {
-            languages.push(value?);
-        }
-        let mut years = Vec::new();
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT SUBSTR(published_date, 1, 4) AS yr FROM books
-             WHERE is_available=1 AND published_date IS NOT NULL AND LENGTH(published_date) >= 4
-               AND SUBSTR(published_date, 1, 4) GLOB '[0-9][0-9][0-9][0-9]'
-             ORDER BY yr DESC",
-        )?;
-        for value in stmt.query_map([], |row| row.get(0))? {
-            years.push(value?);
-        }
-        let collections = query_collections(&conn)?;
-        Ok(CatalogFacets {
-            formats,
-            authors,
-            subjects,
-            publishers,
-            languages,
-            years,
-            collections,
-        })
+                let mut subjects = Vec::new();
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT TRIM(value) FROM books, json_each(books.subjects)
+                 WHERE is_available=1 AND json_valid(books.subjects) AND TRIM(value) <> ''
+                 ORDER BY TRIM(value) COLLATE NOCASE",
+                )?;
+                for value in stmt.query_map([], |row| row.get(0))? {
+                    subjects.push(value?);
+                }
+                let mut publishers = Vec::new();
+                let mut stmt = conn.prepare(
+                "SELECT DISTINCT publisher FROM books WHERE is_available=1 AND publisher IS NOT NULL
+                 AND TRIM(publisher) <> '' ORDER BY publisher COLLATE NOCASE",
+            )?;
+                for value in stmt.query_map([], |row| row.get(0))? {
+                    publishers.push(value?);
+                }
+                let mut languages = Vec::new();
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT language FROM books WHERE is_available=1 AND language IS NOT NULL
+                 AND TRIM(language) <> '' ORDER BY language COLLATE NOCASE",
+                )?;
+                for value in stmt.query_map([], |row| row.get(0))? {
+                    languages.push(value?);
+                }
+                let mut years = Vec::new();
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT SUBSTR(published_date, 1, 4) AS yr FROM books
+                 WHERE is_available=1 AND published_date IS NOT NULL AND LENGTH(published_date) >= 4
+                   AND SUBSTR(published_date, 1, 4) GLOB '[0-9][0-9][0-9][0-9]'
+                 ORDER BY yr DESC",
+                )?;
+                for value in stmt.query_map([], |row| row.get(0))? {
+                    years.push(value?);
+                }
+                let collections = query_collections(conn)?;
+                Ok(CatalogFacets {
+                    formats,
+                    authors,
+                    subjects,
+                    publishers,
+                    languages,
+                    years,
+                    collections,
+                })
+            })
+            .await
     }
 
     pub async fn collections(&self) -> AppResult<Vec<Collection>> {
-        let conn = self.connection.lock().await;
-        query_collections(&conn)
+        self.run(move |conn| query_collections(conn)).await
     }
 
     pub async fn create_collection(&self, input: &SaveCollection) -> AppResult<Collection> {
-        let name = input.name.trim();
-        validate_collection(name, &input.color)?;
-        let now = Utc::now().to_rfc3339();
-        let conn = self.connection.lock().await;
-        conn.execute(
-            "INSERT INTO collections (name, color, created_at) VALUES (?1, ?2, ?3)",
-            params![name, input.color, now],
-        )?;
-        Ok(Collection {
-            id: conn.last_insert_rowid(),
-            name: name.into(),
-            color: input.color.clone(),
-            book_count: 0,
-            created_at: now,
+        let input = input.clone();
+        self.run(move |conn| {
+            let input = &input;
+            let name = input.name.trim();
+            validate_collection(name, &input.color)?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO collections (name, color, created_at) VALUES (?1, ?2, ?3)",
+                params![name, input.color, now],
+            )?;
+            Ok(Collection {
+                id: conn.last_insert_rowid(),
+                name: name.into(),
+                color: input.color.clone(),
+                book_count: 0,
+                created_at: now,
+            })
         })
+        .await
     }
 
     pub async fn update_collection(&self, id: i64, input: &SaveCollection) -> AppResult<()> {
-        let name = input.name.trim();
-        validate_collection(name, &input.color)?;
-        let conn = self.connection.lock().await;
-        if conn.execute(
-            "UPDATE collections SET name=?2, color=?3 WHERE id=?1",
-            params![id, name, input.color],
-        )? == 0
-        {
-            return Err(AppError::NotFound);
-        }
-        Ok(())
+        let input = input.clone();
+        self.run(move |conn| {
+            let input = &input;
+            let name = input.name.trim();
+            validate_collection(name, &input.color)?;
+            if conn.execute(
+                "UPDATE collections SET name=?2, color=?3 WHERE id=?1",
+                params![id, name, input.color],
+            )? == 0
+            {
+                return Err(AppError::NotFound);
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn delete_collection(&self, id: i64) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        if conn.execute("DELETE FROM collections WHERE id=?1", [id])? == 0 {
-            return Err(AppError::NotFound);
-        }
-        Ok(())
+        self.run(move |conn| {
+            if conn.execute("DELETE FROM collections WHERE id=?1", [id])? == 0 {
+                return Err(AppError::NotFound);
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn add_to_collection(&self, collection_id: i64, book_id: i64) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        conn.execute(
-            "INSERT OR IGNORE INTO collection_books (collection_id, book_id, added_at)
-             VALUES (?1, ?2, ?3)",
-            params![collection_id, book_id, Utc::now().to_rfc3339()],
-        )?;
-        Ok(())
+        self.run(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO collection_books (collection_id, book_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+                params![collection_id, book_id, Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn remove_from_collection(&self, collection_id: i64, book_id: i64) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        conn.execute(
-            "DELETE FROM collection_books WHERE collection_id=?1 AND book_id=?2",
-            params![collection_id, book_id],
-        )?;
-        Ok(())
+        self.run(move |conn| {
+            conn.execute(
+                "DELETE FROM collection_books WHERE collection_id=?1 AND book_id=?2",
+                params![collection_id, book_id],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn book_collection_ids(&self, book_id: i64) -> AppResult<Vec<i64>> {
-        let conn = self.connection.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT collection_id FROM collection_books WHERE book_id=?1 ORDER BY collection_id",
-        )?;
-        let rows = stmt.query_map([book_id], |row| row.get(0))?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        self.run(move |conn| {
+                let mut stmt = conn.prepare(
+                "SELECT collection_id FROM collection_books WHERE book_id=?1 ORDER BY collection_id",
+            )?;
+                let rows = stmt.query_map([book_id], |row| row.get(0))?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            })
+            .await
     }
 
     pub async fn duplicates(&self) -> AppResult<Vec<DuplicateGroup>> {
-        let conn = self.connection.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT b.content_hash, b.size, b.id, b.title, b.filename, b.relative_path
-             FROM books b
-             WHERE b.is_available=1 AND b.content_hash IS NOT NULL
-               AND b.content_hash IN (
-                 SELECT content_hash FROM books WHERE is_available=1 AND content_hash IS NOT NULL
-                 GROUP BY content_hash, size HAVING COUNT(*) > 1
-               )
-             ORDER BY b.content_hash, b.relative_path COLLATE NOCASE",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                DuplicateBook {
-                    id: row.get(2)?,
-                    title: row.get(3)?,
-                    filename: row.get(4)?,
-                    relative_path: row.get(5)?,
-                    size: row.get(1)?,
-                },
-            ))
-        })?;
-        let mut groups: Vec<DuplicateGroup> = Vec::new();
-        for row in rows {
-            let (fingerprint, size, book) = row?;
-            if let Some(group) = groups
-                .last_mut()
-                .filter(|group| group.fingerprint == fingerprint)
-            {
-                group.books.push(book);
-            } else {
-                groups.push(DuplicateGroup {
-                    fingerprint,
-                    size,
-                    books: vec![book],
-                });
-            }
-        }
-        Ok(groups)
+        self.run(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT b.content_hash, b.size, b.id, b.title, b.filename, b.relative_path
+                 FROM books b
+                 WHERE b.is_available=1 AND b.content_hash IS NOT NULL
+                   AND b.content_hash IN (
+                     SELECT content_hash FROM books WHERE is_available=1 AND content_hash IS NOT NULL
+                     GROUP BY content_hash, size HAVING COUNT(*) > 1
+                   )
+                 ORDER BY b.content_hash, b.relative_path COLLATE NOCASE",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        DuplicateBook {
+                            id: row.get(2)?,
+                            title: row.get(3)?,
+                            filename: row.get(4)?,
+                            relative_path: row.get(5)?,
+                            size: row.get(1)?,
+                        },
+                    ))
+                })?;
+                let mut groups: Vec<DuplicateGroup> = Vec::new();
+                for row in rows {
+                    let (fingerprint, size, book) = row?;
+                    if let Some(group) = groups
+                        .last_mut()
+                        .filter(|group| group.fingerprint == fingerprint)
+                    {
+                        group.books.push(book);
+                    } else {
+                        groups.push(DuplicateGroup {
+                            fingerprint,
+                            size,
+                            books: vec![book],
+                        });
+                    }
+                }
+                Ok(groups)
+            })
+            .await
     }
 
     pub async fn library_health(&self) -> AppResult<LibraryHealth> {
-        let conn = self.connection.lock().await;
-        let counts = conn.query_row(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(CASE WHEN is_available=1 THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN is_available=0 THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN author IS NULL OR TRIM(author)='' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN subjects='[]' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN cover_filename IS NULL THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN language IS NULL OR TRIM(language)='' THEN 1 ELSE 0 END), 0)
-             FROM books",
-            [],
-            |row| Ok((row.get::<_, usize>(0)?, row.get::<_, usize>(1)?, row.get::<_, usize>(2)?, row.get::<_, usize>(3)?, row.get::<_, usize>(4)?, row.get::<_, usize>(5)?, row.get::<_, usize>(6)?)),
-        )?;
-        let duplicate_groups: usize = conn.query_row(
-            "SELECT COUNT(*) FROM (
-               SELECT content_hash FROM books WHERE is_available=1 AND content_hash IS NOT NULL
-               GROUP BY content_hash, size HAVING COUNT(*) > 1
-             )",
-            [],
-            |row| row.get(0),
-        )?;
-        let mut stmt =
-            conn.prepare("SELECT path, message FROM scan_issues ORDER BY id DESC LIMIT 100")?;
-        let rows = stmt.query_map([], |row| {
-            Ok(HealthIssue {
-                path: row.get(0)?,
-                message: row.get(1)?,
+        self.run(move |conn| {
+
+            let counts = conn.query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN is_available=1 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN is_available=0 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN author IS NULL OR TRIM(author)='' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN subjects='[]' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN cover_filename IS NULL THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN language IS NULL OR TRIM(language)='' THEN 1 ELSE 0 END), 0)
+                 FROM books",
+                [],
+                |row| Ok((row.get::<_, usize>(0)?, row.get::<_, usize>(1)?, row.get::<_, usize>(2)?, row.get::<_, usize>(3)?, row.get::<_, usize>(4)?, row.get::<_, usize>(5)?, row.get::<_, usize>(6)?)),
+            )?;
+            let duplicate_groups: usize = conn.query_row(
+                "SELECT COUNT(*) FROM (
+                   SELECT content_hash FROM books WHERE is_available=1 AND content_hash IS NOT NULL
+                   GROUP BY content_hash, size HAVING COUNT(*) > 1
+                 )",
+                [],
+                |row| row.get(0),
+            )?;
+            let mut stmt =
+                conn.prepare("SELECT path, message FROM scan_issues ORDER BY id DESC LIMIT 100")?;
+            let rows = stmt.query_map([], |row| {
+                Ok(HealthIssue {
+                    path: row.get(0)?,
+                    message: row.get(1)?,
+                })
+            })?;
+            Ok(LibraryHealth {
+                total: counts.0,
+                available: counts.1,
+                unavailable: counts.2,
+                without_author: counts.3,
+                without_subject: counts.4,
+                without_cover: counts.5,
+                without_language: counts.6,
+                duplicate_groups,
+                scan_issues: rows.collect::<Result<Vec<_>, _>>()?,
             })
-        })?;
-        Ok(LibraryHealth {
-            total: counts.0,
-            available: counts.1,
-            unavailable: counts.2,
-            without_author: counts.3,
-            without_subject: counts.4,
-            without_cover: counts.5,
-            without_language: counts.6,
-            duplicate_groups,
-            scan_issues: rows.collect::<Result<Vec<_>, _>>()?,
-        })
+        }).await
     }
 
     pub async fn mark_unavailable(&self, id: i64) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        if conn.execute(
-            "UPDATE books SET is_available=0, updated_at=?2 WHERE id=?1",
-            params![id, Utc::now().to_rfc3339()],
-        )? == 0
-        {
-            return Err(AppError::NotFound);
-        }
-        Ok(())
+        self.run(move |conn| {
+            if conn.execute(
+                "UPDATE books SET is_available=0, updated_at=?2 WHERE id=?1",
+                params![id, Utc::now().to_rfc3339()],
+            )? == 0
+            {
+                return Err(AppError::NotFound);
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn missing_pdf_covers(&self, limit: usize) -> AppResult<Vec<(i64, String)>> {
-        let conn = self.connection.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT id, relative_path FROM books
-             WHERE is_available=1 AND format='pdf' AND cover_filename IS NULL
-             ORDER BY id LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([limit.clamp(1, 10_000) as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, relative_path FROM books
+                 WHERE is_available=1 AND format='pdf' AND cover_filename IS NULL
+                 ORDER BY id LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit.clamp(1, 10_000) as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
     }
 
     pub async fn book(&self, id: i64) -> AppResult<Book> {
-        let conn = self.connection.lock().await;
-        let mut book = conn
-            .query_row(
-                "SELECT id, title, author, description, publisher, published_date, isbn, language,
-                        subjects, filename, relative_path, format, size, modified_at, page_count,
-                        is_available, cover_filename IS NOT NULL, created_at, updated_at
-                 FROM books WHERE id = ?1",
-                [id],
-                row_to_book,
-            )
-            .optional()?
-            .ok_or(AppError::NotFound)?;
-        book.progress = conn
-            .query_row(
-                "SELECT location, percent, updated_at FROM reading_progress WHERE book_id = ?1",
-                [id],
-                |row| {
-                    let location: String = row.get(0)?;
-                    Ok(ReadingProgress {
-                        location: serde_json::from_str(&location).unwrap_or_default(),
-                        percent: row.get(1)?,
-                        updated_at: row.get(2)?,
-                    })
-                },
-            )
-            .optional()?;
-        Ok(book)
+        self.run(move |conn| {
+                let mut book = conn
+                .query_row(
+                    "SELECT id, title, author, description, publisher, published_date, isbn, language,
+                            subjects, filename, relative_path, format, size, modified_at, page_count,
+                            is_available, cover_filename IS NOT NULL, created_at, updated_at
+                     FROM books WHERE id = ?1",
+                    [id],
+                    row_to_book,
+                )
+                .optional()?
+                .ok_or(AppError::NotFound)?;
+                book.progress = conn
+                    .query_row(
+                        "SELECT location, percent, updated_at FROM reading_progress WHERE book_id = ?1",
+                        [id],
+                        |row| {
+                            let location: String = row.get(0)?;
+                            Ok(ReadingProgress {
+                                location: serde_json::from_str(&location).unwrap_or_default(),
+                                percent: row.get(1)?,
+                                updated_at: row.get(2)?,
+                            })
+                        },
+                    )
+                    .optional()?;
+                Ok(book)
+            })
+            .await
     }
 
     pub async fn cover_filename(&self, id: i64) -> AppResult<String> {
-        let conn = self.connection.lock().await;
-        conn.query_row(
-            "SELECT cover_filename FROM books WHERE id = ?1",
-            [id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .ok_or(AppError::NotFound)
+        self.run(move |conn| {
+            conn.query_row(
+                "SELECT cover_filename FROM books WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(AppError::NotFound)
+        })
+        .await
     }
 
     pub async fn update_book(&self, id: i64, update: &UpdateBook) -> AppResult<()> {
@@ -680,165 +833,196 @@ impl Database {
         update: &UpdateBook,
         cover: Option<&str>,
     ) -> AppResult<()> {
-        let title = sanitize_metadata_text(&update.title).ok_or_else(|| {
-            AppError::BadRequest(
-                "informe um titulo legivel; caracteres invalidos foram recusados".into(),
-            )
-        })?;
-        let conn = self.connection.lock().await;
-        let changed = conn.execute(
-            "UPDATE books SET title=?2, author=?3, description=?4, publisher=?5,
-             published_date=?6, isbn=?7, language=?8, subjects=?9, updated_at=?10,
-             metadata_edited=1, cover_filename=COALESCE(?11, cover_filename) WHERE id=?1",
-            params![
-                id,
-                title,
-                clean(&update.author),
-                clean(&update.description),
-                clean(&update.publisher),
-                clean(&update.published_date),
-                clean(&update.isbn),
-                clean(&update.language),
-                serde_json::to_string(&update.subjects).unwrap_or_else(|_| "[]".into()),
-                Utc::now().to_rfc3339(),
-                cover,
-            ],
-        )?;
-        if changed == 0 {
-            return Err(AppError::NotFound);
-        }
-        Ok(())
+        let update = update.clone();
+        let cover = cover.map(str::to_owned);
+        self.run(move |conn| {
+            let update = &update;
+            let cover = cover.as_deref();
+            let title = sanitize_metadata_text(&update.title).ok_or_else(|| {
+                AppError::BadRequest(
+                    "informe um titulo legivel; caracteres invalidos foram recusados".into(),
+                )
+            })?;
+            let changed = conn.execute(
+                "UPDATE books SET title=?2, author=?3, description=?4, publisher=?5,
+                 published_date=?6, isbn=?7, language=?8, subjects=?9, updated_at=?10,
+                 metadata_edited=1, cover_filename=COALESCE(?11, cover_filename) WHERE id=?1",
+                params![
+                    id,
+                    title,
+                    clean(&update.author),
+                    clean(&update.description),
+                    clean(&update.publisher),
+                    clean(&update.published_date),
+                    clean(&update.isbn),
+                    clean(&update.language),
+                    serde_json::to_string(&update.subjects).unwrap_or_else(|_| "[]".into()),
+                    Utc::now().to_rfc3339(),
+                    cover,
+                ],
+            )?;
+            if changed == 0 {
+                return Err(AppError::NotFound);
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn set_cover(&self, id: i64, filename: &str) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        conn.execute(
-            "UPDATE books SET cover_filename=?2, updated_at=?3 WHERE id=?1",
-            params![id, filename, Utc::now().to_rfc3339()],
-        )?;
-        Ok(())
+        let filename = filename.to_owned();
+        self.run(move |conn| {
+            let filename = filename.as_str();
+            conn.execute(
+                "UPDATE books SET cover_filename=?2, updated_at=?3 WHERE id=?1",
+                params![id, filename, Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn save_progress(&self, book_id: i64, progress: &SaveProgress) -> AppResult<()> {
-        if !progress.percent.is_finite() || !(0.0..=100.0).contains(&progress.percent) {
-            return Err(AppError::BadRequest(
-                "o progresso deve estar entre 0 e 100".into(),
-            ));
-        }
-        validate_location(&progress.location)?;
-        let location = progress.location.to_string();
-        let conn = self.connection.lock().await;
-        conn.execute(
-            "INSERT INTO reading_progress (book_id, location, percent, updated_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(book_id) DO UPDATE SET location=excluded.location,
-             percent=excluded.percent, updated_at=excluded.updated_at",
-            params![book_id, location, progress.percent, Utc::now().to_rfc3339()],
-        )?;
-        Ok(())
+        let progress = progress.clone();
+        self.run(move |conn| {
+                let progress = &progress;
+            if !progress.percent.is_finite() || !(0.0..=100.0).contains(&progress.percent) {
+                return Err(AppError::BadRequest(
+                    "o progresso deve estar entre 0 e 100".into(),
+                ));
+            }
+            validate_location(&progress.location)?;
+            let location = progress.location.to_string();
+            conn.execute(
+                "INSERT INTO reading_progress (book_id, location, percent, updated_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(book_id) DO UPDATE SET location=excluded.location,
+                 percent=excluded.percent, updated_at=excluded.updated_at",
+                params![book_id, location, progress.percent, Utc::now().to_rfc3339()],
+            )?;
+            Ok(())
+        }).await
     }
 
     pub async fn remove_progress(&self, book_id: i64) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        conn.execute("DELETE FROM reading_progress WHERE book_id=?1", [book_id])?;
-        Ok(())
+        self.run(move |conn| {
+            conn.execute("DELETE FROM reading_progress WHERE book_id=?1", [book_id])?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn notes(&self, book_id: i64) -> AppResult<Vec<Note>> {
-        let conn = self.connection.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT id, book_id, location, content, created_at, updated_at
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, book_id, location, content, created_at, updated_at
              FROM notes WHERE book_id=?1 ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt.query_map([book_id], row_to_note)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            )?;
+            let rows = stmt.query_map([book_id], row_to_note)?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
     }
 
     pub async fn create_note(&self, book_id: i64, note: &SaveNote) -> AppResult<Note> {
-        validate_location(&note.location)?;
-        if note.content.trim().is_empty() {
-            return Err(AppError::BadRequest(
-                "a anotacao nao pode ficar vazia".into(),
-            ));
-        }
-        let now = Utc::now().to_rfc3339();
-        let conn = self.connection.lock().await;
-        conn.execute(
-            "INSERT INTO notes (book_id, location, content, created_at, updated_at)
+        let note = note.clone();
+        self.run(move |conn| {
+            let note = &note;
+            validate_location(&note.location)?;
+            if note.content.trim().is_empty() {
+                return Err(AppError::BadRequest(
+                    "a anotacao nao pode ficar vazia".into(),
+                ));
+            }
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO notes (book_id, location, content, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![book_id, note.location.to_string(), note.content.trim(), now],
-        )?;
-        let id = conn.last_insert_rowid();
-        Ok(Note {
-            id,
-            book_id,
-            location: note.location.clone(),
-            content: note.content.trim().into(),
-            created_at: now.clone(),
-            updated_at: now,
+                params![book_id, note.location.to_string(), note.content.trim(), now],
+            )?;
+            let id = conn.last_insert_rowid();
+            Ok(Note {
+                id,
+                book_id,
+                location: note.location.clone(),
+                content: note.content.trim().into(),
+                created_at: now.clone(),
+                updated_at: now,
+            })
         })
+        .await
     }
 
     pub async fn delete_note(&self, id: i64) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        if conn.execute("DELETE FROM notes WHERE id=?1", [id])? == 0 {
-            return Err(AppError::NotFound);
-        }
-        Ok(())
+        self.run(move |conn| {
+            if conn.execute("DELETE FROM notes WHERE id=?1", [id])? == 0 {
+                return Err(AppError::NotFound);
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn providers(&self) -> AppResult<Vec<Provider>> {
-        let conn = self.connection.lock().await;
-        let mut stmt = conn.prepare(
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
             "SELECT id, name, kind, base_url, enabled, builtin FROM metadata_providers ORDER BY id",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Provider {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                kind: row.get(2)?,
-                base_url: row.get(3)?,
-                enabled: row.get(4)?,
-                builtin: row.get(5)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            let rows = stmt.query_map([], |row| {
+                Ok(Provider {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    base_url: row.get(3)?,
+                    enabled: row.get(4)?,
+                    builtin: row.get(5)?,
+                })
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
     }
 
     pub async fn add_provider(&self, provider: &SaveProvider) -> AppResult<Provider> {
-        validate_provider(provider)?;
-        let conn = self.connection.lock().await;
-        conn.execute(
-            "INSERT INTO metadata_providers (name, kind, base_url, enabled, builtin)
+        let provider = provider.clone();
+        self.run(move |conn| {
+            let provider = &provider;
+            validate_provider(provider)?;
+            conn.execute(
+                "INSERT INTO metadata_providers (name, kind, base_url, enabled, builtin)
              VALUES (?1, ?2, ?3, ?4, 0)",
-            params![
-                provider.name.trim(),
-                provider.kind,
-                provider.base_url.trim_end_matches('/'),
-                provider.enabled
-            ],
-        )?;
-        Ok(Provider {
-            id: conn.last_insert_rowid(),
-            name: provider.name.trim().into(),
-            kind: provider.kind.clone(),
-            base_url: provider.base_url.trim_end_matches('/').into(),
-            enabled: provider.enabled,
-            builtin: false,
+                params![
+                    provider.name.trim(),
+                    provider.kind,
+                    provider.base_url.trim_end_matches('/'),
+                    provider.enabled
+                ],
+            )?;
+            Ok(Provider {
+                id: conn.last_insert_rowid(),
+                name: provider.name.trim().into(),
+                kind: provider.kind.clone(),
+                base_url: provider.base_url.trim_end_matches('/').into(),
+                enabled: provider.enabled,
+                builtin: false,
+            })
         })
+        .await
     }
 
     pub async fn delete_provider(&self, id: i64) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        if conn.execute(
-            "DELETE FROM metadata_providers WHERE id=?1 AND builtin=0",
-            [id],
-        )? == 0
-        {
-            return Err(AppError::BadRequest(
-                "fontes nativas nao podem ser removidas".into(),
-            ));
-        }
-        Ok(())
+        self.run(move |conn| {
+            if conn.execute(
+                "DELETE FROM metadata_providers WHERE id=?1 AND builtin=0",
+                [id],
+            )? == 0
+            {
+                return Err(AppError::BadRequest(
+                    "fontes nativas nao podem ser removidas".into(),
+                ));
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn create_share(
@@ -847,64 +1031,78 @@ impl Database {
         token: &str,
         expires_at: Option<&str>,
     ) -> AppResult<Share> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.connection.lock().await;
-        conn.execute(
+        let token = token.to_owned();
+        let expires_at = expires_at.map(str::to_owned);
+        self.run(move |conn| {
+            let token = token.as_str();
+            let expires_at = expires_at.as_deref();
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
             "INSERT INTO shares (book_id, token, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
             params![book_id, token, now, expires_at],
         )?;
-        Ok(Share {
-            id: conn.last_insert_rowid(),
-            book_id,
-            token: token.into(),
-            created_at: now,
-            expires_at: expires_at.map(str::to_string),
-            revoked_at: None,
+            Ok(Share {
+                id: conn.last_insert_rowid(),
+                book_id,
+                token: token.into(),
+                created_at: now,
+                expires_at: expires_at.map(str::to_string),
+                revoked_at: None,
+            })
         })
+        .await
     }
 
     pub async fn shares(&self, book_id: i64) -> AppResult<Vec<Share>> {
-        let conn = self.connection.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT id, book_id, token, created_at, expires_at, revoked_at FROM shares
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, book_id, token, created_at, expires_at, revoked_at FROM shares
              WHERE book_id=?1 ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([book_id], |row| {
-            Ok(Share {
-                id: row.get(0)?,
-                book_id: row.get(1)?,
-                token: row.get(2)?,
-                created_at: row.get(3)?,
-                expires_at: row.get(4)?,
-                revoked_at: row.get(5)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            )?;
+            let rows = stmt.query_map([book_id], |row| {
+                Ok(Share {
+                    id: row.get(0)?,
+                    book_id: row.get(1)?,
+                    token: row.get(2)?,
+                    created_at: row.get(3)?,
+                    expires_at: row.get(4)?,
+                    revoked_at: row.get(5)?,
+                })
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
     }
 
     pub async fn revoke_share(&self, id: i64) -> AppResult<()> {
-        let conn = self.connection.lock().await;
-        if conn.execute(
-            "UPDATE shares SET revoked_at=?2 WHERE id=?1",
-            params![id, Utc::now().to_rfc3339()],
-        )? == 0
-        {
-            return Err(AppError::NotFound);
-        }
-        Ok(())
+        self.run(move |conn| {
+            if conn.execute(
+                "UPDATE shares SET revoked_at=?2 WHERE id=?1",
+                params![id, Utc::now().to_rfc3339()],
+            )? == 0
+            {
+                return Err(AppError::NotFound);
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn shared_book_path(&self, token: &str) -> AppResult<(i64, String)> {
-        let conn = self.connection.lock().await;
-        conn.query_row(
-            "SELECT b.id, b.relative_path FROM shares s JOIN books b ON b.id=s.book_id
+        let token = token.to_owned();
+        self.run(move |conn| {
+            let token = token.as_str();
+            conn.query_row(
+                "SELECT b.id, b.relative_path FROM shares s JOIN books b ON b.id=s.book_id
              WHERE s.token=?1 AND s.revoked_at IS NULL
              AND (s.expires_at IS NULL OR s.expires_at > ?2) AND b.is_available=1",
-            params![token, Utc::now().to_rfc3339()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?
-        .ok_or(AppError::NotFound)
+                params![token, Utc::now().to_rfc3339()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or(AppError::NotFound)
+        })
+        .await
     }
 }
 
@@ -1384,3 +1582,7 @@ mod restore_tests {
 #[cfg(test)]
 #[path = "../tests/rust/catalog-regression.rs"]
 mod regression_tests;
+
+#[cfg(test)]
+#[path = "../tests/rust/db-worker.rs"]
+mod worker_tests;

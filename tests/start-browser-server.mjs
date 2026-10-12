@@ -1,15 +1,16 @@
-import { rm } from 'node:fs/promises';
+import { rm, cp } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 
 const runtimeDirectory = 'tests/runtime-data-browser';
 await rm(runtimeDirectory, { recursive: true, force: true });
+await cp('tests/fixtures/e2e', `${runtimeDirectory}/library`, { recursive: true });
 
 const server = spawn('cargo', ['run', '--locked'], {
   stdio: 'inherit',
   env: {
     ...process.env,
     APP_BIND: '127.0.0.1:20004',
-    LIBRARY_ROOT: 'tests/fixtures/e2e',
+    LIBRARY_ROOT: `${runtimeDirectory}/library`,
     DATABASE_PATH: `${runtimeDirectory}/library.db`,
     COVERS_DIR: `${runtimeDirectory}/covers`,
     BRANDING_DIR: `${runtimeDirectory}/branding`,

@@ -1,10 +1,12 @@
 mod api;
 mod auth;
 mod backup;
+mod bounded_io;
 mod config;
 mod covers;
 mod db;
 mod error;
+mod maintenance;
 mod metadata;
 mod models;
 mod opds;

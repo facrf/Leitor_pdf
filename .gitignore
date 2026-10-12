@@ -183,3 +183,6 @@ temp_pdf/
 
 # Descomente a linha abaixo caso não queira versionar nenhum PDF no repositório:
 # *.pdf
+
+# Originais recuperaveis, nunca versionados
+.estante-trash/

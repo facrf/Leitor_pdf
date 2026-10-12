@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { writeFile, utimes, access } from 'node:fs/promises';
 
 const baseUrl = process.env.ESTANTE_E2E_URL || 'http://127.0.0.1:20001/api';
 
@@ -23,7 +24,7 @@ async function waitForTask() {
 assert.equal((await request('/health')).status, 'ok');
 const settings = await request('/settings');
 assert.ok(
-  settings.library_root.endsWith('/pdf') || settings.library_root.endsWith('tests/fixtures/e2e'),
+  settings.library_root.endsWith('/pdf') || settings.library_root.endsWith('tests/fixtures/e2e') || settings.library_root.endsWith('tests/runtime-data-api-ci/library'),
   `raiz de biblioteca inesperada: ${settings.library_root}`,
 );
 assert.equal(settings.auth_enabled, false);
@@ -159,6 +160,56 @@ assert.match(pagedOpds, /rel="next"/);
 assert.match(pagedOpds, /format=txt/);
 assert.match(pagedOpds, /offset=1/);
 
+// Contrato Range: intervalo fora do arquivo nao retransmite o original inteiro.
+const invalidRange = await fetch(`${baseUrl}/books/${protectedBook.id}/file`, { headers: { Range: 'bytes=999999-' } });
+assert.equal(invalidRange.status, 416);
+assert.match(invalidRange.headers.get('content-range'), /^bytes \*\/\d+$/);
+assert.equal((await invalidRange.arrayBuffer()).byteLength, 0);
+const suffixRange = await fetch(`${baseUrl}/books/${protectedBook.id}/file`, { headers: { Range: 'bytes=-4' } });
+assert.equal(suffixRange.status, 206);
+assert.equal((await suffixRange.arrayBuffer()).byteLength, 4);
+
+// Exclusao integral confirmada preserva o original em uma lixeira recuperavel.
+let trashToken;
+try {
+  const removed = await request(`/books/${protectedBook.id}/file`, {
+    method: 'DELETE', body: JSON.stringify({ filename: protectedBook.filename }),
+  });
+  trashToken = removed.trash_token;
+  assert.equal(removed.recoverable_from_application, true);
+  assert.equal((await request(`/books/${protectedBook.id}`)).book.is_available, false);
+  assert.ok((await request('/maintenance/trash')).items.some(item => item.token === trashToken));
+} finally {
+  if (trashToken) await request(`/maintenance/trash/${trashToken}/restore`, { method: 'POST' });
+}
+assert.equal((await request(`/books/${protectedBook.id}`)).book.is_available, true);
+assert.equal((await request('/maintenance/trash')).items.length, 0);
+const noDuplicate = catalog.books.find(book => !groups[0].books.some(candidate => candidate.id === book.id));
+const refusedUnique = await fetch(`${baseUrl}/books/${noDuplicate.id}/file`, {
+  method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: noDuplicate.filename }),
+});
+assert.equal(refusedUnique.status, 400);
+const preview = await request('/maintenance/covers/orphans');
+assert.equal(preview.retention_days, 7);
+const refusedCleanup = await fetch(`${baseUrl}/maintenance/covers/orphans`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filenames: ['../outside.png'] }),
+});
+assert.equal(refusedCleanup.status, 400);
+assert.equal((await request('/maintenance/covers/orphans', { method: 'POST', body: JSON.stringify({ filenames: [] }) })).removed, 0);
+
+if (process.env.ESTANTE_E2E_RUNTIME_DIRECTORY) {
+  const coversRoot = `${process.env.ESTANTE_E2E_RUNTIME_DIRECTORY}/covers`;
+  await writeFile(`${coversRoot}/old-orphan.png`, 'synthetic');
+  await writeFile(`${coversRoot}/recent.png`, 'synthetic');
+  const old = new Date(Date.now() - 8 * 86400 * 1000);
+  await utimes(`${coversRoot}/old-orphan.png`, old, old);
+  const eligible = await request('/maintenance/covers/orphans');
+  assert.deepEqual(eligible.items.map(item => item.filename), ['old-orphan.png']);
+  await request('/maintenance/covers/orphans', { method: 'POST', body: JSON.stringify({ filenames: ['old-orphan.png'] }) });
+  await assert.rejects(access(`${coversRoot}/old-orphan.png`));
+  await access(`${coversRoot}/recent.png`);
+}
+
 const { backup } = await request('/maintenance/backups', { method: 'POST' });
 const archiveResponse = await fetch(`${baseUrl}/maintenance/backups/${encodeURIComponent(backup.filename)}`);
 assert.equal(archiveResponse.status, 200);
@@ -169,6 +220,12 @@ restoreForm.append('backup', new Blob([archive], { type: 'application/zip' }), b
 const restored = await request('/maintenance/restore', { method: 'POST', body: restoreForm });
 assert.equal(restored.restored, true);
 assert.equal(restored.original_books_unchanged, true);
+assert.notEqual((await request('/settings')).catalog_id, settings.catalog_id);
+const staleProgress = await fetch(`${baseUrl}/books/${bookId}/progress`, {
+  method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Catalog-Id': settings.catalog_id },
+  body: JSON.stringify({ location: {}, percent: 88 }),
+});
+assert.equal(staleProgress.status, 400);
 assert.deepEqual((await request(`/books/${bookId}/notes`)).notes[0].location, {});
 
 const corruptRestoreForm = new FormData();
@@ -191,5 +248,23 @@ await request('/maintenance/covers', { method: 'POST' });
 const covers = await waitForTask();
 assert.equal(covers.phase, 'completed');
 assert.equal(covers.profile, 'low_priority');
+
+// Mesmo tamanho e amostras, miolo distinto: DELETE precisa recusar o falso positivo.
+const data = new Uint8Array(192 * 1024).fill(65);
+for (const [index, filename] of ['Sample_A.txt', 'Sample_B.txt'].entries()) {
+  data[96 * 1024] = 65 + index;
+  const form = new FormData(); form.append('file', new Blob([data]), filename);
+  await request('/upload', { method: 'POST', body: form });
+}
+await request('/scan', { method: 'POST' });
+await waitForTask();
+const sampleBooks = (await request('/books?q=Sample')).books;
+assert.equal(sampleBooks.length, 2);
+const sampleDeletion = await fetch(`${baseUrl}/books/${sampleBooks[0].id}/file`, {
+  method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: sampleBooks[0].filename }),
+});
+assert.equal(sampleDeletion.status, 400);
+assert.match((await sampleDeletion.json()).error, /comparacao integral/);
+assert.equal((await request(`/books/${sampleBooks[0].id}`)).book.is_available, true);
 
 console.log('API E2E aprovada: seguranca, falhas, scan incremental, busca, colecoes, duplicatas, saude, OPDS, backup/restauracao e capas.');
