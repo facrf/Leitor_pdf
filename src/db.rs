@@ -8,8 +8,9 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         validate_location, Book, BookSummary, CatalogFacets, CatalogPage, CatalogQuery, Collection,
-        DuplicateBook, DuplicateGroup, HealthIssue, LibraryHealth, Note, Provider, ReadingProgress,
-        SaveCollection, SaveNote, SaveProgress, SaveProvider, Share, UpdateBook,
+        DuplicateBook, DuplicateGroup, FtsStatus, HealthIssue, LibraryHealth, Note, Provider,
+        ReadingProgress, SaveCollection, SaveNote, SaveProgress, SaveProvider, SearchResponse,
+        SearchResultItem, Share, UpdateBook,
     },
     scanner::{metadata_looks_corrupt, sanitize_metadata_text, KnownBook, ScannedBook},
 };
@@ -334,6 +335,10 @@ impl Database {
             }
             drop(select_stmt);
             drop(upsert_stmt);
+            let _ = tx.execute(
+                "DELETE FROM books_fts WHERE book_id IN (SELECT id FROM books WHERE is_available = 0)",
+                [],
+            );
             tx.commit()?;
             Ok((added, updated, unchanged))
         }).await
@@ -391,9 +396,18 @@ impl Database {
                 Some("progress") => "COALESCE(p.percent, 0) DESC, b.title COLLATE NOCASE",
                 _ => "b.title COLLATE NOCASE",
             };
-            let filter_sql = "FROM books b LEFT JOIN reading_progress p ON p.book_id = b.id
-                 WHERE (?1 = '%%' OR b.title LIKE ?1 OR COALESCE(b.author, '') LIKE ?1
-                        OR b.filename LIKE ?1 OR b.subjects LIKE ?1)
+            let fts_query = query.q.as_deref().and_then(sanitize_fts5_query).unwrap_or_default();
+            let content_only = query.content_only.unwrap_or(false);
+            let match_clause = if content_only {
+                "(?13 != '' AND b.id IN (SELECT book_id FROM books_fts WHERE books_fts MATCH ?13))"
+            } else {
+                "(?1 = '%%' OR b.title LIKE ?1 OR COALESCE(b.author, '') LIKE ?1
+                        OR b.filename LIKE ?1 OR b.subjects LIKE ?1
+                        OR (?13 != '' AND b.id IN (SELECT book_id FROM books_fts WHERE books_fts MATCH ?13)))"
+            };
+            let filter_sql = format!(
+                "FROM books b LEFT JOIN reading_progress p ON p.book_id = b.id
+                 WHERE {match_clause}
                    AND (?2 = '' OR b.format = ?2)
                    AND (?3 = '' OR COALESCE(b.author, '') = ?3 COLLATE NOCASE)
                    AND (?4 = '' OR EXISTS (
@@ -412,7 +426,8 @@ impl Database {
                    AND (?12 IS NULL OR EXISTS (
                         SELECT 1 FROM collection_books cb
                         WHERE cb.book_id = b.id AND cb.collection_id = ?12
-                   ))";
+                   ))"
+            );
             let sql = format!(
                 "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
                         b.publisher, b.published_date, b.language, b.size, b.is_available,
@@ -432,13 +447,14 @@ impl Database {
                 progress,
                 availability,
                 query.collection_id,
+                fts_query,
             ];
             let total = conn.query_row(
                 &format!("SELECT COUNT(*) {filter_sql}"),
                 parameters,
                 |row| row.get(0),
             )?;
-            let mut stmt = conn.prepare(&format!("{sql} LIMIT ?13 OFFSET ?14"))?;
+            let mut stmt = conn.prepare(&format!("{sql} LIMIT ?14 OFFSET ?15"))?;
             let rows = stmt.query_map(
                 params![
                     search,
@@ -453,6 +469,7 @@ impl Database {
                     progress,
                     availability,
                     query.collection_id,
+                    fts_query,
                     limit,
                     offset,
                 ],
@@ -495,6 +512,146 @@ impl Database {
                  ORDER BY RANDOM() LIMIT ?1",
             )?;
             let rows = stmt.query_map([limit.clamp(1, 20) as i64], row_to_summary)?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    /// Busca avancada de conteudo com trechos destacados via SQLite FTS5 e ordenacao por relevancia bm25.
+    pub async fn search_content(
+        &self,
+        raw_query: &str,
+        limit: u32,
+        offset: u32,
+    ) -> AppResult<SearchResponse> {
+        let limit = limit.clamp(1, 100);
+        let raw_query = raw_query.trim().to_string();
+        let Some(fts_query) = sanitize_fts5_query(&raw_query) else {
+            return Ok(SearchResponse {
+                query: raw_query,
+                total: 0,
+                results: Vec::new(),
+            });
+        };
+        self.run(move |conn| {
+            let count_sql = "SELECT COUNT(*)
+                 FROM books_fts
+                 JOIN books b ON b.id = books_fts.book_id
+                 WHERE books_fts MATCH ?1 AND b.is_available = 1";
+            let total: usize = conn
+                .query_row(count_sql, [&fts_query], |row| row.get(0))
+                .unwrap_or(0);
+            let sql = "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
+                        b.publisher, b.published_date, b.language, b.size, b.is_available,
+                        b.cover_filename IS NOT NULL, COALESCE(p.percent, 0), b.updated_at,
+                        snippet(books_fts, 4, '<mark>', '</mark>', '...', 25)
+                 FROM books_fts
+                 JOIN books b ON b.id = books_fts.book_id
+                 LEFT JOIN reading_progress p ON p.book_id = b.id
+                 WHERE books_fts MATCH ?1 AND b.is_available = 1
+                 ORDER BY bm25(books_fts)
+                 LIMIT ?2 OFFSET ?3";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(params![fts_query, limit, offset], |row| {
+                let book = row_to_summary(row)?;
+                let snippet: Option<String> = row.get(14)?;
+                Ok(SearchResultItem { book, snippet })
+            })?;
+            let results = rows.collect::<Result<Vec<_>, _>>()?;
+            Ok(SearchResponse {
+                query: raw_query,
+                total,
+                results,
+            })
+        })
+        .await
+    }
+
+    /// Grava ou atualiza a amostra de texto de um livro no indice FTS5.
+    pub async fn index_book_content(
+        &self,
+        book_id: i64,
+        title: &str,
+        author: Option<&str>,
+        subjects: &str,
+        content: &str,
+    ) -> AppResult<()> {
+        let title = title.to_string();
+        let author = author.map(str::to_string);
+        let subjects = subjects.to_string();
+        let content = content.to_string();
+        self.run(move |conn| {
+            conn.execute("DELETE FROM books_fts WHERE book_id = ?1", [book_id])?;
+            conn.execute(
+                "INSERT INTO books_fts(book_id, title, author, subjects, content) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![book_id, title, author, subjects, content],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Remove um livro do indice FTS5.
+    #[allow(dead_code)]
+    pub async fn unindex_book_content(&self, book_id: i64) -> AppResult<()> {
+        self.run(move |conn| {
+            conn.execute("DELETE FROM books_fts WHERE book_id = ?1", [book_id])?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Retorna o status de cobertura do indice FTS5.
+    pub async fn fts_status(&self) -> AppResult<FtsStatus> {
+        self.run(|conn| {
+            let total_books: usize = conn.query_row(
+                "SELECT COUNT(*) FROM books WHERE is_available = 1",
+                [],
+                |r| r.get(0),
+            )?;
+            let indexed_books: usize = conn
+                .query_row("SELECT COUNT(DISTINCT book_id) FROM books_fts", [], |r| {
+                    r.get(0)
+                })
+                .unwrap_or(0);
+            let percent = if total_books == 0 {
+                100.0
+            } else {
+                ((indexed_books as f64 / total_books as f64) * 100.0).clamp(0.0, 100.0)
+            };
+            Ok(FtsStatus {
+                total_books,
+                indexed_books,
+                percent,
+            })
+        })
+        .await
+    }
+
+    /// Retorna livros disponiveis que ainda nao foram indexados na tabela FTS5.
+    pub async fn books_needing_fts(
+        &self,
+        limit: usize,
+    ) -> AppResult<Vec<(i64, String, String, String, Option<String>, String)>> {
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT b.id, b.relative_path, b.format, b.title, b.author, b.subjects
+                 FROM books b
+                 WHERE b.is_available = 1
+                   AND NOT EXISTS (SELECT 1 FROM books_fts WHERE books_fts.book_id = b.id)
+                 ORDER BY b.id
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
         })
         .await
@@ -756,6 +913,7 @@ impl Database {
             {
                 return Err(AppError::NotFound);
             }
+            let _ = conn.execute("DELETE FROM books_fts WHERE book_id=?1", [id]);
             Ok(())
         })
         .await
@@ -843,6 +1001,8 @@ impl Database {
                     "informe um titulo legivel; caracteres invalidos foram recusados".into(),
                 )
             })?;
+            let subjects_json =
+                serde_json::to_string(&update.subjects).unwrap_or_else(|_| "[]".into());
             let changed = conn.execute(
                 "UPDATE books SET title=?2, author=?3, description=?4, publisher=?5,
                  published_date=?6, isbn=?7, language=?8, subjects=?9, updated_at=?10,
@@ -856,7 +1016,7 @@ impl Database {
                     clean(&update.published_date),
                     clean(&update.isbn),
                     clean(&update.language),
-                    serde_json::to_string(&update.subjects).unwrap_or_else(|_| "[]".into()),
+                    subjects_json,
                     Utc::now().to_rfc3339(),
                     cover,
                 ],
@@ -864,6 +1024,10 @@ impl Database {
             if changed == 0 {
                 return Err(AppError::NotFound);
             }
+            let _ = conn.execute(
+                "UPDATE books_fts SET title=?2, author=?3, subjects=?4 WHERE book_id=?1",
+                params![id, title, clean(&update.author), subjects_json],
+            );
             Ok(())
         })
         .await
@@ -1299,6 +1463,14 @@ CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
 CREATE INDEX IF NOT EXISTS idx_notes_book ON notes(book_id);
 CREATE INDEX IF NOT EXISTS idx_shares_token ON shares(token);
 CREATE INDEX IF NOT EXISTS idx_collection_books_book ON collection_books(book_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(
+    book_id UNINDEXED,
+    title,
+    author,
+    subjects,
+    content,
+    tokenize='unicode61 remove_diacritics 2'
+);
 "#;
 
 fn migrate(connection: &Connection) -> rusqlite::Result<()> {
@@ -1328,6 +1500,16 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_books_fingerprint ON books(content_hash, size)",
         [],
     )?;
+    connection.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(
+            book_id UNINDEXED,
+            title,
+            author,
+            subjects,
+            content,
+            tokenize='unicode61 remove_diacritics 2'
+        );",
+    )?;
     Ok(())
 }
 
@@ -1356,6 +1538,9 @@ fn validate_restore_schema(candidate: &Connection) -> AppResult<()> {
     let mut tables = reference.prepare("SELECT name FROM sqlite_master WHERE type='table'")?;
     for table in tables.query_map([], |row| row.get::<_, String>(0))? {
         let table = table?;
+        if table.starts_with("books_fts") {
+            continue;
+        }
         let mut fields = reference.prepare(&format!("PRAGMA table_info({table})"))?;
         let fields = fields
             .query_map([], |row| row.get::<_, String>(1))?
@@ -1434,6 +1619,23 @@ fn validate_restore_data(candidate: &Connection) -> AppResult<()> {
         return Err(AppError::BadRequest("progresso invalido no backup".into()));
     }
     Ok(())
+}
+
+/// Sanitiza strings de busca para FTS5 com prefixos sem caracteres especiais invalidos.
+pub fn sanitize_fts5_query(raw: &str) -> Option<String> {
+    let mut terms = Vec::new();
+    for word in raw.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
+        let trimmed = word.trim();
+        if !trimmed.is_empty() {
+            let escaped = trimmed.replace('"', "\"\"");
+            terms.push(format!("\"{}\"*", escaped));
+        }
+    }
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" "))
+    }
 }
 
 fn open_connection(path: &Path) -> AppResult<Connection> {

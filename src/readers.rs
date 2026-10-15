@@ -460,6 +460,225 @@ fn natural_key(value: &str) -> Vec<String> {
     parts
 }
 
+/// Remove tags HTML e scripts/estilos, retornando o texto limpo com espacos normalizados.
+pub fn strip_html_tags_to_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut in_script_or_style = false;
+    let mut tag_buf = String::new();
+    let mut chars = html.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '<' {
+            in_tag = true;
+            tag_buf.clear();
+            while let Some(&next) = chars.peek() {
+                if next == '>' || next.is_whitespace() {
+                    break;
+                }
+                tag_buf.push(next.to_ascii_lowercase());
+                chars.next();
+            }
+            if tag_buf == "script" || tag_buf == "style" {
+                in_script_or_style = true;
+            } else if tag_buf == "/script" || tag_buf == "/style" {
+                in_script_or_style = false;
+            }
+            continue;
+        } else if ch == '>' {
+            in_tag = false;
+            text.push(' ');
+            continue;
+        }
+        if !in_tag && !in_script_or_style {
+            text.push(ch);
+        }
+    }
+    let unescaped = text
+        .replace("&nbsp;", " ")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&#39;", "'");
+    normalize_whitespace(&unescaped)
+}
+
+/// Normaliza espacos em branco consecutivos em um unico espaco.
+pub fn normalize_whitespace(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut last_was_space = true;
+    for ch in input.chars() {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                output.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            output.push(ch);
+            last_was_space = false;
+        }
+    }
+    output.trim().to_string()
+}
+
+fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
+    if s.len() > max_bytes {
+        let mut end = max_bytes;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+    }
+}
+
+fn extract_pdf_text_sample(path: &Path, max_bytes: usize) -> Option<String> {
+    let doc = lopdf::Document::load(path).ok()?;
+    let pages = doc.get_pages();
+    let mut page_numbers: Vec<u32> = pages.keys().copied().collect();
+    page_numbers.sort_unstable();
+    let mut text = String::new();
+    for page_num in page_numbers.into_iter().take(50) {
+        if let Ok(page_text) = doc.extract_text(&[page_num]) {
+            let normalized = normalize_whitespace(&page_text);
+            if !normalized.is_empty() {
+                text.push_str(&normalized);
+                text.push(' ');
+            }
+            if text.len() >= max_bytes {
+                break;
+            }
+        }
+    }
+    truncate_to_char_boundary(&mut text, max_bytes);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn extract_epub_text_sample(path: &Path, max_bytes: usize) -> Option<String> {
+    let manifest = epub_manifest(path).ok()?;
+    let mut combined = String::new();
+    for chapter in manifest.chapters.iter().take(40) {
+        if let Ok((bytes, _)) = archive_resource(path, &chapter.href, 512 * 1024) {
+            let html = match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(e) => WINDOWS_1252.decode(e.as_bytes()).0.into_owned(),
+            };
+            let text = strip_html_tags_to_text(&html);
+            if !text.is_empty() {
+                combined.push_str(&text);
+                combined.push(' ');
+            }
+            if combined.len() >= max_bytes {
+                break;
+            }
+        }
+    }
+    truncate_to_char_boundary(&mut combined, max_bytes);
+    let trimmed = combined.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub fn mobi_text_sample(path: &Path, max_bytes: usize) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    if data.len() < 86 {
+        return None;
+    }
+    let record_count = be_u16(&data, 76).ok()? as usize;
+    if record_count < 2 || data.len() < 78 + record_count * 8 {
+        return None;
+    }
+    let mut offsets = Vec::with_capacity(record_count + 1);
+    for index in 0..record_count {
+        offsets.push(be_u32(&data, 78 + index * 8).ok()? as usize);
+    }
+    offsets.push(data.len());
+    let first = slice_record(&data, &offsets, 0).ok()?;
+    if first.len() < 16 {
+        return None;
+    }
+    let compression = be_u16(first, 0).ok()?;
+    let text_length = be_u32(first, 4).ok()? as usize;
+    let text_records = be_u16(first, 8).ok()? as usize;
+    let encryption = be_u16(first, 12).ok()?;
+    if encryption != 0 || text_records >= record_count {
+        return None;
+    }
+    let mut output = Vec::with_capacity(max_bytes.min(text_length));
+    for index in 1..=text_records {
+        let record = slice_record(&data, &offsets, index).ok()?;
+        match compression {
+            1 => output.extend_from_slice(record),
+            2 => {
+                let _ = palmdoc_decompress_append(record, &mut output);
+            }
+            _ => return None,
+        }
+        if output.len() >= max_bytes {
+            break;
+        }
+    }
+    if output.len() > max_bytes {
+        output.truncate(max_bytes);
+    }
+    let text = match String::from_utf8(output) {
+        Ok(value) => value,
+        Err(error) => WINDOWS_1252.decode(error.as_bytes()).0.into_owned(),
+    };
+    let cleaned = strip_html_tags_to_text(&text);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn extract_plain_or_html_sample(path: &Path, format: &str, max_bytes: usize) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let limit = if matches!(format, "html" | "htm" | "fb2") {
+        (max_bytes * 3) as u64
+    } else {
+        max_bytes as u64
+    };
+    let bytes = crate::bounded_io::read_limited(&mut file, limit).ok()?;
+    let content = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => WINDOWS_1252.decode(e.as_bytes()).0.into_owned(),
+    };
+    let mut text = if matches!(format, "html" | "htm" | "fb2") {
+        strip_html_tags_to_text(&content)
+    } else {
+        normalize_whitespace(&content)
+    };
+    truncate_to_char_boundary(&mut text, max_bytes);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Extrai uma amostra de texto representativa (ate max_bytes) para indexacao no SQLite FTS5.
+pub fn extract_text_sample(path: &Path, format: &str, max_bytes: usize) -> Option<String> {
+    match format {
+        "txt" | "md" | "html" | "htm" | "fb2" => {
+            extract_plain_or_html_sample(path, format, max_bytes)
+        }
+        "epub" => extract_epub_text_sample(path, max_bytes),
+        "mobi" | "azw" | "azw3" => mobi_text_sample(path, max_bytes),
+        "pdf" => extract_pdf_text_sample(path, max_bytes),
+        _ => None,
+    }
+}
+
 const READER_STYLE: &str = r#"
 :root{color-scheme:light dark}body{margin:0;background:#f7f2e8;color:#24231f;font:19px/1.75 Georgia,serif}
 main{max-width:760px;margin:auto;padding:5vh 7vw 14vh}img{max-width:100%;height:auto}a{color:#9b4b2f}
@@ -494,6 +713,15 @@ mod tests {
         assert_eq!(strip_active_html(script_test), "A  B  C");
         let safe_text = "Uma <scripture>passagem bíblica</scripture> não é script.";
         assert_eq!(strip_active_html(safe_text), safe_text);
+    }
+
+    #[test]
+    fn strips_html_tags_and_scripts_for_text_search() {
+        let input = "<p>Parágrafo 1.</p><script>console.log('ignorar');</script><style>.css{}</style><p>Parágrafo 2 &amp; texto &nbsp; limpo.</p>";
+        assert_eq!(
+            strip_html_tags_to_text(input),
+            "Parágrafo 1. Parágrafo 2 & texto limpo."
+        );
     }
 }
 

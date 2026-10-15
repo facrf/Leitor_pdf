@@ -1,3 +1,65 @@
+# Checkpoint — 2026-10-15
+
+## Revisão atual — Busca textual completa com SQLite FTS5
+
+Implementação da busca textual completa no conteúdo dos livros com SQLite FTS5.
+
+### Mudanças realizadas:
+
+1. **Modelos (`src/models.rs`)**:
+   - Adicionado campo opcional `content_only: Option<bool>` em `CatalogQuery`.
+   - Adicionadas estruturas `SearchResultItem`, `SearchResponse` e `FtsStatus` para resposta de busca e status do índice FTS5.
+
+2. **Extração de Texto Multi-Formato (`src/readers.rs`)**:
+   - Implementado `extract_text_sample(path, format, max_bytes)` com amostragem de até 256 KiB:
+     - PDF: extração de texto via `lopdf::Document::extract_text`.
+     - EPUB: leitura dos arquivos HTML/XHTML via `archive_resource` e limpeza de tags.
+     - MOBI / PalmDOC: descompressão e extração de texto com remoção de tags HTML.
+     - TXT / MD / HTML / HTM / FB2: decodificação de texto bruto e sanitização com `strip_html_tags_to_text`.
+   - Implementadas `strip_html_tags_to_text` (com descarte de blocos `<script>`/`<style>` e decodificação de entidades HTML) e `truncate_to_char_boundary` (garantindo cortes sem quebrar caracteres multi-byte UTF-8).
+   - Teste unitário adicionado: `strips_html_tags_and_scripts_for_text_search`.
+
+3. **Banco de Dados SQLite FTS5 (`src/db.rs`)**:
+   - Tabela virtual `books_fts` criada com tokenizer `unicode61 remove_diacritics 2` no schema inicial e migração.
+   - `validate_restore_schema`: shadow tables FTS5 (`books_fts*`) ignoradas na checagem estrita de schema obrigatório, preservando compatibilidade com backups anteriores.
+   - Sanitização de query FTS5 (`sanitize_fts5_query`) protegendo contra operadores e caracteres especiais que causam erro de sintaxe SQL no engine FTS5.
+   - Integração da cláusula FTS5 em `list_books` com suporte a filtro `content_only`.
+   - Novos métodos: `search_content` (busca com snippet `<mark>` e BM25), `index_book_content`, `unindex_book_content`, `fts_status` e `books_needing_fts`.
+   - Sincronização automática do índice `books_fts` em atualizações de metadados (`update_book_with_cover`), exclusões e indisponibilização de livros (`mark_unavailable`).
+   - Teste de regressão adicionado em `tests/rust/catalog-regression.rs`: `fts5_indexing_and_search_regression`.
+
+4. **API HTTP (`src/api.rs`)**:
+   - Rota `GET /api/search?q=...&limit=...&offset=...`: busca por conteúdo com trechos destacados (`snippet`) e ordenação BM25.
+   - Rota `GET /api/maintenance/fts`: estatísticas de cobertura do índice FTS5 (`total_books`, `indexed_books`, `percent`).
+   - Rota `POST /api/maintenance/fts`: reindexação em lote sob controle de exclusividade de manutenção (`coordinate_restore`).
+
+5. **Interface Web (`web/index.html`, `web/app.js`, `web/styles.css`)**:
+   - `web/index.html`: adicionado seletor de modo de busca (Catálogo completo vs. Apenas conteúdo dos livros) na busca avançada; adicionado disclosure de Manutenção FTS com percentual e botão de indexação imediata.
+   - `web/app.js`: suporte a `content_only` nos filtros de catálogo, renderização do status FTS em `loadMaintenance`, função `reindexFts()` e bindings de eventos.
+   - `web/styles.css`: estilos para marcações de texto `<mark>` nos temas claro e escuro.
+
+6. **Testes e Documentação**:
+   - `tests/api-e2e.mjs`: testes de ponta a ponta para `/search`, `/maintenance/fts` e query `content_only`.
+   - `docs/api.md` e `README.md` atualizados com as novas rotas e recursos.
+
+### Verificações realmente executadas:
+- `cargo clippy --locked --all-targets -- -D warnings`: passou sem nenhum aviso (0 warnings).
+- `cargo test --locked`: 41 passaram, 0 falharam, 1 teste de volume ignorado.
+- `npm run test:ui`: aprovado (contrato visual, IDs únicos e gravação de progresso).
+- `npm run test:api`: aprovado (todas as rotas E2E incluindo FTS5 /search, /maintenance/fts e content_only).
+- `npm run test:auth`: aprovado (saúde pública e proteção HTTP Basic).
+- `npm run test:browser`: aprovado (Playwright E2E browser test completo).
+
+### Limitações:
+- A extração textual é amostral (até 256 KiB por livro) para manter o banco leve e responsivo.
+- PDFs baseados exclusivamente em imagens escaneadas (sem camada de OCR) não geram texto extraível.
+- Livros muito corrompidos geram conteúdo vazio e não impedem a indexação dos demais livros.
+
+### Próximo passo:
+- Apresentar o resultado ao usuário e verificar se há novas demandas ou se deseja realizar commit/push.
+
+---
+
 # Checkpoint — 2026-10-12
 
 ## Revisão atual — seis melhorias autorizadas

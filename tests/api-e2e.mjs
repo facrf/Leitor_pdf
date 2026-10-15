@@ -81,6 +81,32 @@ for (const query of ['limit=0', 'limit=201', 'offset=-1']) {
   assert.equal((await fetch(`${baseUrl}/books?${query}`)).status, 400);
 }
 
+// Busca textual completa via SQLite FTS5 e manutencao de indice
+const ftsInitial = await request('/maintenance/fts');
+assert.equal(ftsInitial.total_books, 3);
+assert.ok(typeof ftsInitial.indexed_books === 'number');
+const ftsReindex = await request('/maintenance/fts', { method: 'POST' });
+assert.ok(typeof ftsReindex.processed === 'number');
+assert.equal(ftsReindex.total_books, 3);
+const ftsStatus = await request('/maintenance/fts');
+assert.equal(ftsStatus.total_books, 3);
+assert.equal(ftsStatus.indexed_books, 3);
+assert.equal(ftsStatus.percent, 100);
+
+const ftsSearch = await request('/search?q=catalogacao');
+assert.ok(ftsSearch.results.length >= 1);
+assert.ok(ftsSearch.results.some(r => r.snippet && r.snippet.includes('catalogacao')));
+
+const contentCatalog = await request('/books?q=catalogacao&content_only=true');
+assert.ok(contentCatalog.books.length >= 1);
+
+const emptySearch = await request('/search?q=');
+assert.equal(emptySearch.total, 0);
+assert.equal(emptySearch.results.length, 0);
+const missingSearch = await fetch(`${baseUrl}/search`);
+assert.equal(missingSearch.status, 400);
+
+
 // Posicoes aceitas podem ser restauradas; HTML e tipos invalidos sao recusados.
 const bookId = catalog.books[0].id;
 for (const location of [[], null, { type: 'page', page: '<b>1</b>' }, { page: 1.5 }, { percent: 101 }]) {

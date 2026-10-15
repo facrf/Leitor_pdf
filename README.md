@@ -10,6 +10,7 @@ Biblioteca digital privada e offline-first para PDF, EPUB, MOBI/AZW, CBZ e livro
 - As mudanças pelos controles do leitor são salvas após 700 ms e ao fechar o leitor. A posição é gravada primeiro em IndexedDB e reenviada ao abrir a aplicação, reconectar, voltar à aba e a cada 15 segundos. Ao ocultar/sair da aba, há uma tentativa adicional com `keepalive`; encerramento antes de concluir a gravação local ainda pode perder a última mudança. PDF usa a página informada nos controles da aplicação (não acompanha o visualizador nativo); texto/MOBI usa o percentual manual.
 - Reúne automaticamente livros iniciados em **Minha mesa de leitura** e permite retirá-los dela sem apagar o arquivo.
 - Filtra por formato, autor, assunto, coleção, editora, idioma, ano, tamanho, disponibilidade e progresso; ordena por título, autor, ano, atualização, tamanho ou leitura.
+- Realiza busca textual completa com SQLite FTS5 no conteúdo dos livros (PDF, EPUB, MOBI, TXT, MD, HTML, FB2), com suporte a acentos (`unicode61 remove_diacritics 2`), trechos destacados e relevância BM25, incluindo painel de indexação na manutenção.
 - Organiza livros em coleções coloridas editáveis, sem mover os arquivos no disco.
 - Executa a varredura em segundo plano, mostrando etapa, arquivo atual, quantidade e porcentagem indexada.
 - Reaproveita metadados e assinatura de arquivos cujo tamanho e data não mudaram, tornando as atualizações seguintes incrementais.

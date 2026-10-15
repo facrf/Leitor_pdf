@@ -80,6 +80,7 @@ Parâmetros de `GET /books`:
 | Parâmetro | Valores |
 |---|---|
 | `q` | Texto em título, autor, arquivo, descrição, editora, ISBN ou assuntos |
+| `content_only` | `true` ou `false`; quando `true`, restringe `q` exclusivamente ao conteúdo textual indexado via FTS5 |
 | `format`, `author`, `subject`, `publisher`, `language`, `year` | Correspondência da faceta |
 | `min_size`, `max_size` | Bytes, inclusivos |
 | `progress` | `unread`, `reading` ou `finished` |
@@ -87,6 +88,15 @@ Parâmetros de `GET /books`:
 | `collection_id` | ID numérico da coleção |
 | `limit`, `offset` | Tamanho de página (1–200, padrão 60) e deslocamento inteiro sem sinal (padrão 0) |
 | `sort` | `title`, `author`, `year`, `recent`, `size` ou `progress` |
+
+## Busca textual completa (FTS5)
+
+| Método e rota | Finalidade |
+|---|---|
+| `GET /search?q=...` | Pesquisa no conteúdo textual indexado; retorna livros com trechos (`snippet`) destacados por tags `<mark>`. Suporta `limit` (padrão 30, máx 200) e `offset`. |
+| `GET /maintenance/fts` | Retorna o status de cobertura do índice FTS5 (`total_books`, `indexed_books`, `percent`). |
+| `POST /maintenance/fts` | Indexa em lotes o conteúdo de livros pendentes (suporta `?limit=50`). Requer ausência de outras operações exclusivas. |
+
 
 Exclusão exige JSON `{ "filename": "nome-exato.pdf" }`. O servidor compara com a entrada catalogada, resolve novamente o caminho dentro da raiz e não oferece recuperação interna.
 

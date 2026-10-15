@@ -27,8 +27,8 @@ use crate::{
     error::{AppError, AppResult},
     maintenance, metadata,
     models::{
-        CatalogQuery, CreateShare, MetadataCandidate, SaveCollection, SaveNote, SaveProgress,
-        SaveProvider, UpdateBook,
+        CatalogQuery, CreateShare, FtsStatus, MetadataCandidate, SaveCollection, SaveNote,
+        SaveProgress, SaveProvider, SearchResponse, UpdateBook,
     },
     opds, readers,
     scanner::{self, ScanEvent, ScanProfile, ScanStatus, SUPPORTED_EXTENSIONS},
@@ -61,6 +61,7 @@ pub fn router(state: AppState) -> Router {
             post(upload_book).layer(DefaultBodyLimit::max(1024 * 1024 * 1024)),
         )
         .route("/books", get(list_books))
+        .route("/search", get(search_books))
         .route("/reading-desk", get(reading_desk))
         .route("/suggestions", get(suggestions))
         .route("/books/{id}", get(get_book).patch(update_book))
@@ -124,6 +125,10 @@ pub fn router(state: AppState) -> Router {
             post(restore_backup).layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)),
         )
         .route("/maintenance/covers", post(start_cover_generation))
+        .route(
+            "/maintenance/fts",
+            get(get_fts_status).post(reindex_fts_content),
+        )
         .route("/opds", get(opds_catalog))
         .route("/opds/import", post(import_opds))
         .layer(middleware::from_fn_with_state(
@@ -149,6 +154,7 @@ async fn coordinate_restore(
     let exclusive = (request.method() == Method::POST
         && (path == "/maintenance/restore"
             || path == "/maintenance/covers/orphans"
+            || path == "/maintenance/fts"
             || (path.starts_with("/maintenance/trash/") && path.ends_with("/restore"))))
         || (request.method() == Method::DELETE
             && path.starts_with("/books/")
@@ -885,6 +891,68 @@ async fn clean_orphan_covers(
     .await
     .map_err(|error| AppError::Internal(error.to_string()))??;
     Ok(Json(json!({ "removed": removed })))
+}
+
+#[derive(Deserialize)]
+struct SearchContentQuery {
+    q: String,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+async fn search_books(
+    State(state): State<AppState>,
+    Query(query): Query<SearchContentQuery>,
+) -> AppResult<Json<SearchResponse>> {
+    let result = state
+        .db
+        .search_content(
+            &query.q,
+            query.limit.unwrap_or(30),
+            query.offset.unwrap_or(0),
+        )
+        .await?;
+    Ok(Json(result))
+}
+
+async fn get_fts_status(State(state): State<AppState>) -> AppResult<Json<FtsStatus>> {
+    let status = state.db.fts_status().await?;
+    Ok(Json(status))
+}
+
+#[derive(Deserialize)]
+struct ReindexQuery {
+    limit: Option<usize>,
+}
+
+async fn reindex_fts_content(
+    State(state): State<AppState>,
+    Query(query): Query<ReindexQuery>,
+) -> AppResult<Json<Value>> {
+    ensure_maintenance_idle(&state)?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let root = library_root(&state).await?;
+    let pending = state.db.books_needing_fts(limit).await?;
+    let mut indexed_count = 0;
+    for (id, relative_path, format, title, author, subjects) in pending {
+        let content = match scanner::resolve_book_path(&root, &relative_path) {
+            Ok(full_path) => crate::readers::extract_text_sample(&full_path, &format, 256 * 1024)
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        state
+            .db
+            .index_book_content(id, &title, author.as_deref(), &subjects, &content)
+            .await?;
+        indexed_count += 1;
+    }
+    let status = state.db.fts_status().await?;
+    Ok(Json(json!({
+        "processed": indexed_count,
+        "total_books": status.total_books,
+        "indexed_books": status.indexed_books,
+        "percent": status.percent,
+    })))
 }
 
 async fn update_book(

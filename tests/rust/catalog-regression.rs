@@ -161,3 +161,78 @@ async fn facets_extract_subjects_and_years_correctly() {
     assert_eq!(facets.subjects, vec!["Aventura", "Drama", "Ficção"]);
     assert_eq!(facets.years, vec!["2001", "1984"]);
 }
+
+#[tokio::test]
+async fn fts5_indexing_and_search_regression() {
+    let db = fixture_database();
+    let status_before = db.fts_status().await.unwrap();
+    assert_eq!(status_before.indexed_books, 0);
+    assert_eq!(status_before.total_books, 205);
+
+    db.index_book_content(
+        1,
+        "Dom Casmurro",
+        Some("Machado de Assis"),
+        "[\"Literatura Brasileira\"]",
+        "Capitu traiu ou não traiu Bento Santiago? Uma tragédia de ciúmes.",
+    )
+    .await
+    .unwrap();
+
+    let status_after = db.fts_status().await.unwrap();
+    assert_eq!(status_after.indexed_books, 1);
+
+    let search_traiu = db
+        .list_books(&CatalogQuery {
+            q: Some("traiu".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(search_traiu.total, 1);
+    assert_eq!(search_traiu.books[0].id, 1);
+
+    let search_tragedia = db
+        .list_books(&CatalogQuery {
+            q: Some("tragedia".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(search_tragedia.total, 1);
+    assert_eq!(search_tragedia.books[0].id, 1);
+
+    let search_res = db.search_content("ciumes", 10, 0).await.unwrap();
+    assert_eq!(search_res.total, 1);
+    assert_eq!(search_res.results.len(), 1);
+    assert_eq!(search_res.results[0].book.id, 1);
+    assert!(search_res.results[0]
+        .snippet
+        .as_ref()
+        .unwrap()
+        .contains("<mark>"));
+
+    let search_content_only = db
+        .list_books(&CatalogQuery {
+            q: Some("Same title".into()),
+            content_only: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(search_content_only.total, 0);
+
+    for weird_query in ["& * %", "ciúmes (teste) \"", "NOT OR AND : *"] {
+        assert!(db
+            .list_books(&CatalogQuery {
+                q: Some(weird_query.into()),
+                ..Default::default()
+            })
+            .await
+            .is_ok());
+    }
+
+    db.unindex_book_content(1).await.unwrap();
+    let status_removed = db.fts_status().await.unwrap();
+    assert_eq!(status_removed.indexed_books, 0);
+}

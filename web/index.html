@@ -101,6 +101,7 @@
         <label><span>Disponibilidade</span><select id="filter-availability"><option value="">Todos</option><option value="available">Disponíveis</option><option value="missing">Ausentes</option></select></label>
         <label><span>Tamanho mínimo (MB)</span><input id="filter-min-size" type="number" min="0" step="1" placeholder="0"></label>
         <label><span>Tamanho máximo (MB)</span><input id="filter-max-size" type="number" min="0" step="1" placeholder="Sem limite"></label>
+        <label><span>Modo de busca</span><select id="filter-search-mode"><option value="">Tudo (título, autor e conteúdo)</option><option value="content">Apenas conteúdo</option></select></label>
         <label><span>Ordenar</span><select id="filter-sort"><option value="title">Título</option><option value="author">Autor</option><option value="year">Ano</option><option value="recent">Atualização</option><option value="size">Tamanho</option><option value="progress">Progresso</option></select></label>
       </div>
     </details>
@@ -210,6 +211,13 @@
           <div class="maintenance-actions"><button class="button ghost small" id="preview-orphan-covers" type="button">Revisar capas antigas</button><button class="button danger small hidden" id="clean-orphan-covers" type="button">Limpar capas da prévia</button><button class="button ghost small" id="generate-covers" type="button">Gerar capas pendentes</button><a class="button ghost small" href="/api/opds" target="_blank">Abrir catálogo OPDS</a></div><p id="cover-cleanup-preview" class="detail-description" aria-live="polite"></p>
           <form id="opds-import-form" class="inline-admin-form"><input name="url" type="url" required placeholder="https://servidor/catalog.xml"><button class="button primary small" type="submit">Importar livros do OPDS</button></form>
           <small>A importação exige rede habilitada e só ocorre após confirmação explícita.</small>
+        </div>
+      </details>
+      <details class="admin-disclosure" id="fts-panel"><summary>Busca textual completa (FTS5) <b id="fts-indexed-summary">0%</b></summary>
+        <div class="admin-disclosure-body">
+          <p>Indexação do conteúdo textual dos livros (PDF, EPUB, MOBI, TXT, MD, HTML, FB2) com SQLite FTS5 para busca rápida e insensível a acentos.</p>
+          <div class="maintenance-actions"><button class="button primary small" id="reindex-fts-btn" type="button">Indexar conteúdo agora</button></div>
+          <p id="fts-status-message" class="detail-description" aria-live="polite">Carregando status do índice FTS…</p>
         </div>
       </details>
       <div class="auth-status"><span aria-hidden="true">⌾</span><div><strong id="auth-status-title">Proteção da API</strong><small id="auth-status-detail">Verificando configuração…</small></div></div>

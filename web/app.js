@@ -2,7 +2,7 @@ const state = {
   catalog: { total: 0, limit: 60, offset: 0, requestId: 0 },
   books: [], facets: { formats: [], authors: [], subjects: [] }, desk: [], suggestions: [],
   settings: null, providers: [], collections: [], bookCollectionIds: [], currentBook: null,
-  filters: { q: '', format: '', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '' },
+  filters: { q: '', format: '', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '', content_only: '' },
   reader: { kind: null, location: {}, percent: 0, items: [] },
   searchTimer: null, scanTimer: null, scanObservedRunning: false,
   carouselIndex: 0, carouselTimer: null,
@@ -119,6 +119,7 @@ function renderFilters() {
   $('#filter-min-size').value = state.filters.min_size ? Math.round(Number(state.filters.min_size) / 1024 / 1024) : '';
   $('#filter-max-size').value = state.filters.max_size ? Math.round(Number(state.filters.max_size) / 1024 / 1024) : '';
   $('#filter-sort').value = state.filters.sort || 'title';
+  $('#filter-search-mode').value = state.filters.content_only ? 'content' : '';
   $('#clear-filters').classList.toggle('hidden', !Object.values(state.filters).some(Boolean));
 }
 
@@ -605,14 +606,42 @@ async function deleteCollection(row) {
 
 async function loadMaintenance() {
   try {
-    const [{ health }, { groups }, { backups }, { items }] = await Promise.all([
-      api('/maintenance/health'), api('/maintenance/duplicates'), api('/maintenance/backups'), api('/maintenance/trash'),
+    const [{ health }, { groups }, { backups }, { items }, fts] = await Promise.all([
+      api('/maintenance/health'), api('/maintenance/duplicates'), api('/maintenance/backups'), api('/maintenance/trash'), api('/maintenance/fts'),
     ]);
     renderHealth(health);
     renderDuplicates(groups);
     renderBackups(backups);
     renderTrash(items);
+    renderFtsStatus(fts);
   } catch (error) { toast(`Manutenção: ${error.message}`, true); }
+}
+
+function renderFtsStatus(fts) {
+  if (!fts) return;
+  const percent = Math.round(fts.percent);
+  $('#fts-indexed-summary').textContent = `${percent}%`;
+  $('#fts-status-message').textContent = `${fts.indexed_books} de ${fts.total_books} livro(s) com conteúdo indexado (${percent}%).`;
+}
+
+async function reindexFts() {
+  const button = $('#reindex-fts-btn');
+  button.disabled = true;
+  $('#fts-status-message').textContent = 'Indexando conteúdo textual…';
+  try {
+    let result;
+    do {
+      result = await api('/maintenance/fts', { method: 'POST' });
+      renderFtsStatus(result);
+      if (result.processed === 0) break;
+    } while (result.indexed_books < result.total_books);
+    toast('Indexação FTS concluída.');
+  } catch (error) {
+    toast(`Falha na indexação FTS: ${error.message}`, true);
+  } finally {
+    button.disabled = false;
+    await loadMaintenance();
+  }
 }
 
 function renderHealth(health) {
@@ -874,8 +903,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#suggestion-prev').onclick = () => moveSuggestion(-1); $('#suggestion-next').onclick = () => moveSuggestion(1);
   [['#filter-format','format'], ['#filter-author','author'], ['#filter-subject','subject'], ['#filter-collection','collection_id'], ['#filter-publisher','publisher'], ['#filter-language','language'], ['#filter-year','year'], ['#filter-progress','progress'], ['#filter-availability','availability']].forEach(([selector, key]) => { $(selector).onchange = event => { state.filters[key] = event.target.value; loadBooks(); }; });
   $('#filter-sort').onchange = event => { state.filters.sort = event.target.value === 'title' ? '' : event.target.value; loadBooks(); };
+  $('#filter-search-mode').onchange = event => { state.filters.content_only = event.target.value === 'content' ? 'true' : ''; loadBooks(); };
   [['#filter-min-size','min_size'], ['#filter-max-size','max_size']].forEach(([selector, key]) => { $(selector).onchange = event => { state.filters[key] = event.target.value ? String(Math.round(Number(event.target.value) * 1024 * 1024)) : ''; loadBooks(); }; });
-  $('#clear-filters').onclick = () => { state.filters = { q: '', format: '', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '' }; $('#search').value = ''; loadBooks(''); };
+  $('#clear-filters').onclick = () => { state.filters = { q: '', format: '', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '', content_only: '' }; $('#search').value = ''; loadBooks(''); };
   $$('.view-switch button').forEach(button => button.onclick = () => { $$('.view-switch button').forEach(item => item.classList.remove('active')); button.classList.add('active'); $('#book-grid').classList.toggle('list', button.dataset.view === 'list'); });
   $('#catalog-previous').onclick = () => loadBooks(state.filters.q, Math.max(0, state.catalog.offset - state.catalog.limit));
   $('#catalog-next').onclick = () => loadBooks(state.filters.q, state.catalog.offset + state.catalog.limit);
@@ -891,6 +921,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#refresh-health').onclick = loadMaintenance; $('#create-backup').onclick = createBackup;
   $('#restore-input').onchange = event => restoreBackup(event.target.files[0]);
   $('#preview-orphan-covers').onclick = previewCoverCleanup;
+  $('#reindex-fts-btn').onclick = reindexFts;
   $('#generate-covers').onclick = generateCovers; $('#opds-import-form').onsubmit = importOpds;
   $('#reader-close').onclick = closeReader; $('#notes-toggle').onclick = () => $('#notes-panel').classList.toggle('open'); $('#notes-close').onclick = () => $('#notes-panel').classList.remove('open');
   $('#note-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const content = new FormData(form).get('content'); try { await api(`/books/${state.currentBook.id}/notes`, { method: 'POST', body: JSON.stringify({ content, location: state.reader.location }) }); form.reset(); loadNotes(); toast('Anotação salva nesta posição.'); } catch (error) { toast(error.message, true); } };

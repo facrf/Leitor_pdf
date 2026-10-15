@@ -385,3 +385,6 @@ button { color: inherit; }
 
 .catalog-pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 32px 0; flex-wrap: wrap; }
 .catalog-pagination button:disabled { opacity: .45; cursor: default; }
+
+mark { background: #ffeaa7; color: #171815; padding: 1px 4px; border-radius: 3px; font-weight: 600; }
+@media (prefers-color-scheme: dark) { mark { background: #d75d36; color: #fff; } }

@@ -47,6 +47,7 @@ pub struct CatalogQuery {
     pub sort: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
+    pub content_only: Option<bool>,
 }
 
 /// Pagina do catalogo, com total calculado usando os mesmos filtros.
@@ -56,6 +57,26 @@ pub struct CatalogPage {
     pub total: u64,
     pub limit: u32,
     pub offset: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResultItem {
+    pub book: BookSummary,
+    pub snippet: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResponse {
+    pub query: String,
+    pub total: usize,
+    pub results: Vec<SearchResultItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FtsStatus {
+    pub total_books: usize,
+    pub indexed_books: usize,
+    pub percent: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
