@@ -226,6 +226,7 @@ function detailMarkup(book) {
       <div class="detail-actions">
         <button class="button primary" id="read-book" ${canRead && book.is_available ? '' : 'disabled'}>▶ ${book.progress?.percent ? 'Continuar leitura' : 'Começar a ler'}</button>
         <a class="button ghost" href="/api/books/${book.id}/file?download=true">⇩ Baixar</a>
+        <a class="button ghost" href="/api/books/${book.id}/notes/export?format=markdown" download>✎ Notas (.md)</a>
         <button class="button ghost" id="share-book">↗ Compartilhar</button>
         <button class="button ghost" id="edit-book">✎ Editar</button>
       </div>
@@ -540,11 +541,94 @@ function flushProgressOnPageExit() {
 }
 
 async function loadNotes() {
+  if (!state.currentBook) return;
   try {
     const { notes } = await api(`/books/${state.currentBook.id}/notes`);
-    $('#notes-list').innerHTML = notes.length ? notes.map(note => `<article class="note"><p>${escapeHtml(note.content)}</p><footer><span>${escapeHtml(locationLabel(note.location))} · ${new Date(note.updated_at).toLocaleDateString()}</span><button data-note-delete="${note.id}">Excluir</button></footer></article>`).join('') : '<p class="detail-description">As anotações feitas durante a leitura aparecerão aqui.</p>';
-    $$('[data-note-delete]').forEach(button => button.onclick = async () => { await api(`/notes/${button.dataset.noteDelete}`, { method: 'DELETE' }); loadNotes(); });
+    state.notes = notes;
+    const mdExport = $('#export-notes-md');
+    if (mdExport) mdExport.href = `/api/books/${state.currentBook.id}/notes/export?format=markdown`;
+    const jsonExport = $('#export-notes-json');
+    if (jsonExport) jsonExport.href = `/api/books/${state.currentBook.id}/notes/export?format=json`;
+    const toggleLabel = $('#notes-toggle .desktop-label');
+    if (toggleLabel) toggleLabel.textContent = notes.length ? `Anotações (${notes.length})` : 'Anotações';
+    renderNotesList();
   } catch (error) { toast(error.message, true); }
+}
+
+function renderNotesList() {
+  const list = $('#notes-list');
+  if (!list) return;
+  const filter = (state.notesFilter || '').toLowerCase().trim();
+  const colorFilter = state.notesColorFilter || 'all';
+
+  const filtered = (state.notes || []).filter(note => {
+    const loc = note.location || {};
+    const quote = (loc.quote || loc.selected_text || '').toLowerCase();
+    const content = (note.content || '').toLowerCase();
+    const color = loc.color || '';
+    if (colorFilter !== 'all' && color !== colorFilter) return false;
+    if (filter && !content.includes(filter) && !quote.includes(filter)) return false;
+    return true;
+  });
+
+  if (!filtered.length) {
+    list.innerHTML = (state.notes || []).length
+      ? '<p class="detail-description">Nenhuma anotação corresponde aos filtros aplicados.</p>'
+      : '<p class="detail-description">As anotações e destaques feitos durante a leitura aparecerão aqui.</p>';
+    return;
+  }
+
+  list.innerHTML = filtered.map(note => {
+    const loc = note.location || {};
+    const quote = loc.quote || loc.selected_text;
+    const color = loc.color || '';
+    const colorClass = color ? `swatch swatch-${escapeHtml(color)}` : '';
+    const colorStyle = color === 'yellow' ? '--quote-color:#eab308;--quote-bg:rgba(254,240,138,0.25)'
+      : color === 'green' ? '--quote-color:#22c55e;--quote-bg:rgba(187,247,208,0.25)'
+      : color === 'blue' ? '--quote-color:#3b82f6;--quote-bg:rgba(191,219,254,0.25)'
+      : '';
+
+    return `<article class="note" data-note-id="${note.id}">
+      ${quote ? `<blockquote class="note-quote" style="${colorStyle}">${escapeHtml(quote)}</blockquote>` : ''}
+      <p>${escapeHtml(note.content)}</p>
+      <footer>
+        <button type="button" class="note-location-link" data-jump-note="${note.id}">
+          ${escapeHtml(locationLabel(note.location))}
+        </button>
+        <span>${color ? `<span class="${colorClass}">${escapeHtml(color)}</span> · ` : ''}${new Date(note.updated_at).toLocaleDateString()}</span>
+        <button data-note-delete="${note.id}" aria-label="Excluir anotação">Excluir</button>
+      </footer>
+    </article>`;
+  }).join('');
+
+  $$('[data-note-delete]', list).forEach(button => button.onclick = async () => {
+    await api(`/notes/${button.dataset.noteDelete}`, { method: 'DELETE' });
+    loadNotes();
+  });
+
+  $$('[data-jump-note]', list).forEach(button => button.onclick = () => {
+    const note = (state.notes || []).find(n => n.id === Number(button.dataset.jumpNote));
+    if (note && note.location) jumpToLocation(note.location);
+  });
+}
+
+function jumpToLocation(loc) {
+  if (!loc) return;
+  if (loc.page && state.reader.kind === 'pdf') {
+    const input = $('#page-input');
+    if (input) changePdfPage(Number(loc.page) - Number(input.value || 1));
+  } else if (loc.chapter !== undefined && state.reader.kind === 'epub') {
+    renderPagedResource('epub', Number(loc.chapter));
+  } else if (loc.page_index !== undefined && state.reader.kind === 'cbz') {
+    renderPagedResource('comic', Number(loc.page_index));
+  } else if (loc.percent !== undefined) {
+    const slider = $('#percent-input');
+    if (slider) {
+      slider.value = Math.round(Number(loc.percent));
+      slider.dispatchEvent(new Event('input'));
+      slider.dispatchEvent(new Event('change'));
+    }
+  }
 }
 
 function locationLabel(location = {}) {
@@ -924,7 +1008,39 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#reindex-fts-btn').onclick = reindexFts;
   $('#generate-covers').onclick = generateCovers; $('#opds-import-form').onsubmit = importOpds;
   $('#reader-close').onclick = closeReader; $('#notes-toggle').onclick = () => $('#notes-panel').classList.toggle('open'); $('#notes-close').onclick = () => $('#notes-panel').classList.remove('open');
-  $('#note-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; const content = new FormData(form).get('content'); try { await api(`/books/${state.currentBook.id}/notes`, { method: 'POST', body: JSON.stringify({ content, location: state.reader.location }) }); form.reset(); loadNotes(); toast('Anotação salva nesta posição.'); } catch (error) { toast(error.message, true); } };
+  $('#notes-filter')?.addEventListener('input', event => {
+    state.notesFilter = event.target.value;
+    renderNotesList();
+  });
+  $$('[data-filter-color]').forEach(button => {
+    button.onclick = () => {
+      $$('[data-filter-color]').forEach(b => b.classList.remove('active'));
+      button.classList.add('active');
+      state.notesColorFilter = button.dataset.filterColor;
+      renderNotesList();
+    };
+  });
+  $('#note-form').onsubmit = async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const content = data.get('content');
+    const quote = (data.get('quote') || '').trim();
+    const color = (data.get('color') || '').trim();
+    const location = { ...(state.reader.location || {}) };
+    if (quote) location.quote = quote;
+    if (color) location.color = color;
+    try {
+      await api(`/books/${state.currentBook.id}/notes`, {
+        method: 'POST',
+        body: JSON.stringify({ content, location })
+      });
+      form.reset();
+      if (form.elements.color && form.elements.color[0]) form.elements.color[0].checked = true;
+      await loadNotes();
+      toast('Anotação salva nesta posição.');
+    } catch (error) { toast(error.message, true); }
+  };
   window.addEventListener('pagehide', flushProgressOnPageExit);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushProgressOnPageExit(); else retryPendingProgress(); });
 });

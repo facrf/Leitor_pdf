@@ -15,6 +15,10 @@ fn rejects_unrestorable_positions_and_accepts_reader_locations() {
         json!({"percent":101}),
         json!({"type":[]}),
         json!({"href":null}),
+        json!({"color":123}),
+        json!({"color":"x".repeat(33)}),
+        json!({"quote":true}),
+        json!({"quote":"x".repeat(4097)}),
         json!({"extra":"x".repeat(8192)}),
     ] {
         assert!(validate_location(&location).is_err(), "{location}");
@@ -25,6 +29,7 @@ fn rejects_unrestorable_positions_and_accepts_reader_locations() {
         json!({"type":"chapter","chapter":0,"href":"OPS/chapter.xhtml"}),
         json!({"type":"comic","page_index":0,"page":1}),
         json!({"type":"percent","percent":37}),
+        json!({"type":"chapter","chapter":1,"color":"yellow","quote":"trecho destacado"}),
     ] {
         validate_location(&location).unwrap();
     }

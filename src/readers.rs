@@ -531,30 +531,122 @@ fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
     }
 }
 
-fn extract_pdf_text_sample(path: &Path, max_bytes: usize) -> Option<String> {
-    let doc = lopdf::Document::load(path).ok()?;
-    let pages = doc.get_pages();
-    let mut page_numbers: Vec<u32> = pages.keys().copied().collect();
-    page_numbers.sort_unstable();
+pub fn is_tesseract_available() -> bool {
+    std::process::Command::new("tesseract")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn extract_pdf_ocr_sample(path: &Path, max_bytes: usize, _timeout_secs: u64) -> Option<String> {
+    if !is_tesseract_available() {
+        return None;
+    }
+    let tmp_base = std::env::var("TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(".cache/tmp"));
+    let temp_dir = tmp_base.join(format!("estante-ocr-{}", rand::random::<u64>()));
+    if std::fs::create_dir_all(&temp_dir).is_err() {
+        return None;
+    }
+    let temp_prefix = temp_dir.join("page");
+
+    let pdftoppm_status = std::process::Command::new("pdftoppm")
+        .arg("-png")
+        .arg("-r")
+        .arg("150")
+        .arg("-f")
+        .arg("1")
+        .arg("-l")
+        .arg("2")
+        .arg(path)
+        .arg(&temp_prefix)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
     let mut text = String::new();
-    for page_num in page_numbers.into_iter().take(50) {
-        if let Ok(page_text) = doc.extract_text(&[page_num]) {
-            let normalized = normalize_whitespace(&page_text);
-            if !normalized.is_empty() {
-                text.push_str(&normalized);
-                text.push(' ');
-            }
-            if text.len() >= max_bytes {
-                break;
+    if pdftoppm_status.map(|s| s.success()).unwrap_or(false) {
+        if let Ok(entries) = std::fs::read_dir(&temp_dir) {
+            let mut pngs: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "png"))
+                .collect();
+            pngs.sort();
+            for png in pngs {
+                let mut cmd = std::process::Command::new("tesseract");
+                cmd.arg(&png).arg("stdout").arg("-l").arg("por+eng");
+                let ocr_output = cmd.output().or_else(|_| {
+                    std::process::Command::new("tesseract")
+                        .arg(&png)
+                        .arg("stdout")
+                        .output()
+                });
+                if let Ok(output) = ocr_output {
+                    if output.status.success() {
+                        if let Ok(page_text) = String::from_utf8(output.stdout) {
+                            let normalized = normalize_whitespace(&page_text);
+                            if !normalized.is_empty() {
+                                text.push_str(&normalized);
+                                text.push(' ');
+                            }
+                        }
+                    }
+                }
+                if text.len() >= max_bytes {
+                    break;
+                }
             }
         }
     }
+    let _ = std::fs::remove_dir_all(&temp_dir);
     truncate_to_char_boundary(&mut text, max_bytes);
     let trimmed = text.trim();
     if trimmed.is_empty() {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn extract_pdf_text_sample_with_options(
+    path: &Path,
+    max_bytes: usize,
+    ocr_enabled: bool,
+    ocr_timeout_secs: u64,
+) -> Option<String> {
+    if let Ok(doc) = lopdf::Document::load(path) {
+        let pages = doc.get_pages();
+        let mut page_numbers: Vec<u32> = pages.keys().copied().collect();
+        page_numbers.sort_unstable();
+        let mut text = String::new();
+        for page_num in page_numbers.into_iter().take(50) {
+            if let Ok(page_text) = doc.extract_text(&[page_num]) {
+                let normalized = normalize_whitespace(&page_text);
+                if !normalized.is_empty() {
+                    text.push_str(&normalized);
+                    text.push(' ');
+                }
+                if text.len() >= max_bytes {
+                    break;
+                }
+            }
+        }
+        truncate_to_char_boundary(&mut text, max_bytes);
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    // Fallback gracioso para OCR em PDFs escaneados / baseados em imagem
+    if ocr_enabled {
+        extract_pdf_ocr_sample(path, max_bytes, ocr_timeout_secs)
+    } else {
+        None
     }
 }
 
@@ -667,14 +759,28 @@ fn extract_plain_or_html_sample(path: &Path, format: &str, max_bytes: usize) -> 
 }
 
 /// Extrai uma amostra de texto representativa (ate max_bytes) para indexacao no SQLite FTS5.
+#[allow(dead_code)]
 pub fn extract_text_sample(path: &Path, format: &str, max_bytes: usize) -> Option<String> {
+    extract_text_sample_with_options(path, format, max_bytes, true, 15)
+}
+
+/// Extrai uma amostra de texto com controle explicito de OCR e timeout.
+pub fn extract_text_sample_with_options(
+    path: &Path,
+    format: &str,
+    max_bytes: usize,
+    ocr_enabled: bool,
+    ocr_timeout_secs: u64,
+) -> Option<String> {
     match format {
         "txt" | "md" | "html" | "htm" | "fb2" => {
             extract_plain_or_html_sample(path, format, max_bytes)
         }
         "epub" => extract_epub_text_sample(path, max_bytes),
         "mobi" | "azw" | "azw3" => mobi_text_sample(path, max_bytes),
-        "pdf" => extract_pdf_text_sample(path, max_bytes),
+        "pdf" => {
+            extract_pdf_text_sample_with_options(path, max_bytes, ocr_enabled, ocr_timeout_secs)
+        }
         _ => None,
     }
 }
@@ -722,6 +828,12 @@ mod tests {
             strip_html_tags_to_text(input),
             "Parágrafo 1. Parágrafo 2 & texto limpo."
         );
+    }
+
+    #[test]
+    fn ocr_sample_returns_gracefully_when_unavailable_or_non_pdf() {
+        let path = Path::new("tests/fixtures/nao-existe.pdf");
+        assert_eq!(extract_pdf_ocr_sample(path, 1024, 5), None);
     }
 }
 

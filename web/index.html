@@ -246,8 +246,43 @@
     </header>
     <div class="reader-stage" id="reader-stage"></div>
     <aside class="notes-panel" id="notes-panel">
-      <header><div><p class="eyebrow">CADERNO</p><h2>Anotações</h2></div><button class="icon-button" id="notes-close" aria-label="Fechar anotações">×</button></header>
-      <form id="note-form"><textarea name="content" required maxlength="10000" placeholder="Escreva uma ideia, citação ou lembrete…"></textarea><button class="button primary" type="submit">Salvar nesta posição</button></form>
+      <header>
+        <div><p class="eyebrow">CADERNO</p><h2 id="notes-header-title">Anotações</h2></div>
+        <div class="notes-header-actions">
+          <a class="button light small" id="export-notes-md" title="Exportar notas em Markdown" download>Exportar .md</a>
+          <a class="button light small" id="export-notes-json" title="Exportar notas em JSON" download>.json</a>
+          <button class="icon-button" id="notes-close" aria-label="Fechar anotações">×</button>
+        </div>
+      </header>
+      <div class="notes-tools" id="notes-tools">
+        <input type="search" id="notes-filter" placeholder="Filtrar anotações e citações…" aria-label="Filtrar anotações">
+        <div class="notes-color-filters" role="radiogroup" aria-label="Filtrar por cor de destaque">
+          <button type="button" class="color-filter-btn active" data-filter-color="all" title="Todas as cores">Todas</button>
+          <button type="button" class="color-filter-btn color-btn-yellow" data-filter-color="yellow" title="Amarelo">●</button>
+          <button type="button" class="color-filter-btn color-btn-green" data-filter-color="green" title="Verde">●</button>
+          <button type="button" class="color-filter-btn color-btn-blue" data-filter-color="blue" title="Azul">●</button>
+        </div>
+      </div>
+      <form id="note-form">
+        <label class="field quote-field">
+          <span>Trecho ou citação destacada</span>
+          <input type="text" name="quote" id="note-quote" maxlength="4000" placeholder="Cole ou selecione um trecho do livro…">
+        </label>
+        <div class="color-picker-group">
+          <span>Marca-texto:</span>
+          <div class="color-radios">
+            <label class="color-radio"><input type="radio" name="color" value="" checked><span>Nenhum</span></label>
+            <label class="color-radio"><input type="radio" name="color" value="yellow"><span class="swatch swatch-yellow">Amarelo</span></label>
+            <label class="color-radio"><input type="radio" name="color" value="green"><span class="swatch swatch-green">Verde</span></label>
+            <label class="color-radio"><input type="radio" name="color" value="blue"><span class="swatch swatch-blue">Azul</span></label>
+          </div>
+        </div>
+        <label class="field">
+          <span>Anotação</span>
+          <textarea name="content" required maxlength="10000" placeholder="Escreva uma ideia, reflexão ou comentário…"></textarea>
+        </label>
+        <button class="button primary" type="submit">Salvar nesta posição</button>
+      </form>
       <div id="notes-list" class="notes-list"></div>
     </aside>
   </section>

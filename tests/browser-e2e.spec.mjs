@@ -68,6 +68,21 @@ test('cataloga, filtra, organiza, le, anota e cria backup pela interface', async
   await page.locator('#note-form textarea').fill('Anotacao criada pelo teste de navegador.');
   await page.locator('#note-form button[type="submit"]').click();
   await expect(page.locator('#notes-list')).toContainText('Anotacao criada pelo teste de navegador.');
+
+  // Salva nota com trecho destacado e cor de marca-texto
+  await page.locator('#note-quote').fill('Citacao relevante do texto');
+  await page.locator('input[name="color"][value="yellow"]').check();
+  await page.locator('#note-form textarea').fill('Comentario sobre a citacao amarela');
+  await page.locator('#note-form button[type="submit"]').click();
+  await expect(page.locator('#notes-list')).toContainText('Citacao relevante do texto');
+  await expect(page.locator('#notes-list')).toContainText('Comentario sobre a citacao amarela');
+
+  // Filtra as notas pelo campo de busca do caderno
+  await page.locator('#notes-filter').fill('relevante');
+  await expect(page.locator('#notes-list')).toContainText('Citacao relevante do texto');
+  await expect(page.locator('#notes-list')).not.toContainText('Anotacao criada pelo teste de navegador.');
+  await page.locator('#notes-filter').fill('');
+
   await page.locator('#reader-close').click();
   await expect(page.locator('#reading-desk')).toBeVisible();
   await page.reload();

@@ -125,6 +125,45 @@ const { note } = await request(`/books/${bookId}/notes`, {
 });
 assert.deepEqual(note.location, {});
 
+// Criacao de nota com citacao destacada e cor de marca-texto
+const highlightNote = await request(`/books/${bookId}/notes`, {
+  method: 'POST',
+  body: JSON.stringify({
+    content: 'Minha analise do trecho',
+    location: { type: 'chapter', chapter: 0, quote: 'Trecho citado da obra', color: 'yellow' },
+  }),
+});
+assert.equal(highlightNote.note.content, 'Minha analise do trecho');
+assert.equal(highlightNote.note.location.quote, 'Trecho citado da obra');
+assert.equal(highlightNote.note.location.color, 'yellow');
+
+// Busca e listagem geral de notas
+const allNotes = await request('/notes');
+assert.ok(allNotes.notes.length >= 2);
+assert.ok(allNotes.notes.some(n => n.book_id === bookId));
+
+const filteredNotes = await request(`/notes?q=analise&color=yellow`);
+assert.equal(filteredNotes.notes.length, 1);
+assert.equal(filteredNotes.notes[0].location.color, 'yellow');
+
+// Exportacao de notas em Markdown e JSON
+const mdExportRes = await fetch(`${baseUrl}/books/${bookId}/notes/export?format=markdown`);
+assert.equal(mdExportRes.status, 200);
+assert.ok(mdExportRes.headers.get('content-type').includes('text/markdown'));
+const mdText = await mdExportRes.text();
+assert.ok(mdText.includes('Minha analise do trecho'));
+assert.ok(mdText.includes('Trecho citado da obra'));
+
+const jsonExportRes = await fetch(`${baseUrl}/books/${bookId}/notes/export?format=json`);
+assert.equal(jsonExportRes.status, 200);
+assert.ok(jsonExportRes.headers.get('content-type').includes('application/json'));
+const jsonData = await jsonExportRes.json();
+assert.ok(jsonData.total_notes >= 2);
+
+const libMdExport = await fetch(`${baseUrl}/notes/export?format=markdown`);
+assert.equal(libMdExport.status, 200);
+assert.ok((await libMdExport.text()).includes('Anotações da Biblioteca'));
+
 // Falhas antes da gravacao devem preservar todos os metadados.
 const original = (await request(`/books/${bookId}`)).book;
 const candidate = { provider: 'synthetic', title: 'Nao deve substituir o titulo', authors: [], subjects: [], cover_url: 'http://127.0.0.1/cover.jpg' };
@@ -252,7 +291,9 @@ const staleProgress = await fetch(`${baseUrl}/books/${bookId}/progress`, {
   body: JSON.stringify({ location: {}, percent: 88 }),
 });
 assert.equal(staleProgress.status, 400);
-assert.deepEqual((await request(`/books/${bookId}/notes`)).notes[0].location, {});
+const restoredNotes = (await request(`/books/${bookId}/notes`)).notes;
+assert.ok(restoredNotes.some(n => JSON.stringify(n.location) === '{}'));
+assert.ok(restoredNotes.some(n => n.location.quote === 'Trecho citado da obra' && n.location.color === 'yellow'));
 
 const corruptRestoreForm = new FormData();
 corruptRestoreForm.append('backup', new Blob(['isto nao e um arquivo ZIP']), 'corrompido.zip');

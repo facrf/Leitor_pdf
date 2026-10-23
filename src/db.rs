@@ -8,9 +8,9 @@ use crate::{
     error::{AppError, AppResult},
     models::{
         validate_location, Book, BookSummary, CatalogFacets, CatalogPage, CatalogQuery, Collection,
-        DuplicateBook, DuplicateGroup, FtsStatus, HealthIssue, LibraryHealth, Note, Provider,
-        ReadingProgress, SaveCollection, SaveNote, SaveProgress, SaveProvider, SearchResponse,
-        SearchResultItem, Share, UpdateBook,
+        DuplicateBook, DuplicateGroup, FtsStatus, HealthIssue, LibraryHealth, Note, NoteWithBook,
+        NotesQuery, Provider, ReadingProgress, SaveCollection, SaveNote, SaveProgress, SaveProvider,
+        SearchResponse, SearchResultItem, Share, UpdateBook,
     },
     scanner::{metadata_looks_corrupt, sanitize_metadata_text, KnownBook, ScannedBook},
 };
@@ -1082,6 +1082,66 @@ impl Database {
              FROM notes WHERE book_id=?1 ORDER BY updated_at DESC",
             )?;
             let rows = stmt.query_map([book_id], row_to_note)?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    pub async fn list_all_notes(&self, query: &NotesQuery) -> AppResult<Vec<NoteWithBook>> {
+        let q = query.q.clone();
+        let book_id = query.book_id;
+        let color = query.color.clone();
+        let limit = query.limit.unwrap_or(100).clamp(1, 500) as i64;
+        let offset = query.offset.unwrap_or(0) as i64;
+
+        self.run(move |conn| {
+            let mut sql = String::from(
+                "SELECT n.id, n.book_id, b.title, b.author, n.location, n.content, n.created_at, n.updated_at
+             FROM notes n
+             JOIN books b ON b.id = n.book_id
+             WHERE 1=1",
+            );
+            let mut params = Vec::<rusqlite::types::Value>::new();
+
+            if let Some(id) = book_id {
+                sql.push_str(" AND n.book_id = ?");
+                params.push(id.into());
+            }
+            if let Some(ref search) = q {
+                let trimmed = search.trim();
+                if !trimmed.is_empty() {
+                    sql.push_str(" AND (n.content LIKE ? OR n.location LIKE ?)");
+                    let pattern = format!("%{trimmed}%");
+                    params.push(pattern.clone().into());
+                    params.push(pattern.into());
+                }
+            }
+            if let Some(ref c) = color {
+                let trimmed = c.trim();
+                if !trimmed.is_empty() {
+                    sql.push_str(" AND n.location LIKE ?");
+                    let pattern = format!("%\"color\":\"{trimmed}\"%");
+                    params.push(pattern.into());
+                }
+            }
+            sql.push_str(" ORDER BY n.updated_at DESC LIMIT ? OFFSET ?");
+            params.push(limit.into());
+            params.push(offset.into());
+
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+                let location: String = row.get(4)?;
+                Ok(NoteWithBook {
+                    id: row.get(0)?,
+                    book_id: row.get(1)?,
+                    book_title: row.get(2)?,
+                    book_author: row.get(3)?,
+                    location: serde_json::from_str(&location).unwrap_or_default(),
+                    content: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
         })
         .await

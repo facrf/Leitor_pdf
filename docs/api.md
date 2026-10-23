@@ -121,8 +121,11 @@ Ao salvar progresso, `location` deve ser um objeto JSON de até 8 KiB serializad
 |---|---|
 | `PUT /books/{id}/progress` | Salva localização JSON e percentual de 0 a 100. |
 | `DELETE /books/{id}/progress` | Remove o progresso e, portanto, o livro da mesa de leitura. |
-| `GET /books/{id}/notes` | Lista anotações. |
-| `POST /books/{id}/notes` | Cria anotação ligada à localização. |
+| `GET /books/{id}/notes` | Lista anotações do livro. |
+| `GET /books/{id}/notes/export?format=markdown\|json` | Exporta anotações e citações do livro em Markdown ou JSON. |
+| `GET /notes?q=...&book_id=...&color=...` | Busca e lista anotações gerais da biblioteca com metadados do livro. |
+| `GET /notes/export?format=markdown\|json` | Exporta todas as anotações e destaques da biblioteca. |
+| `POST /books/{id}/notes` | Cria anotação ligada à localização, com suporte a citação (`quote`) e cor de marca-texto (`color`). |
 | `DELETE /notes/{id}` | Exclui uma anotação. |
 | `GET /books/{id}/epub` | Manifesto de capítulos EPUB. |
 | `GET /books/{id}/epub/resource/{caminho}` | Recurso interno de EPUB. |
@@ -140,11 +143,16 @@ Exemplo de progresso por página:
 }
 ```
 
-Exemplo de anotação:
+Exemplo de anotação com destaque e marca-texto:
 
 ```json
 {
-  "location": { "type": "chapter", "chapter": 3 },
+  "location": {
+    "type": "chapter",
+    "chapter": 3,
+    "quote": "Trecho memorável destacado pelo leitor.",
+    "color": "yellow"
+  },
   "content": "Retomar a discussão deste conceito."
 }
 ```

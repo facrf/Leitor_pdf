@@ -194,6 +194,32 @@ pub struct Note {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteWithBook {
+    pub id: i64,
+    pub book_id: i64,
+    pub book_title: String,
+    pub book_author: Option<String>,
+    pub location: serde_json::Value,
+    pub content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NotesQuery {
+    pub q: Option<String>,
+    pub book_id: Option<i64>,
+    pub color: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ExportNotesQuery {
+    pub format: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SaveNote {
     #[serde(default = "empty_location")]
@@ -296,6 +322,19 @@ pub fn validate_location(location: &serde_json::Value) -> crate::error::AppResul
         return Err(AppError::BadRequest(
             "tipo ou href da posicao invalido".into(),
         ));
+    }
+    if let Some(color) = location.get("color") {
+        if color.as_str().is_none_or(|c| c.len() > 32) {
+            return Err(AppError::BadRequest("cor da posicao invalida".into()));
+        }
+    }
+    if let Some(quote) = location
+        .get("quote")
+        .or_else(|| location.get("selected_text"))
+    {
+        if quote.as_str().is_none_or(|q| q.len() > 4096) {
+            return Err(AppError::BadRequest("citacao da posicao invalida".into()));
+        }
     }
     Ok(())
 }

@@ -12,6 +12,8 @@ fn fixture_config() -> Config {
         auth_username: None,
         auth_password: None,
         cover_timeout_seconds: 60,
+        ocr_enabled: true,
+        ocr_timeout_seconds: 15,
     }
 }
 

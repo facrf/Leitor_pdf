@@ -1,3 +1,73 @@
+# Checkpoint — 2026-10-23
+
+## Revisão atual — Destaques com Marca-texto, Gestão/Exportação de Anotações e Suporte a OCR
+
+Implementação de destaques com cores de marca-texto no leitor, gestão e exportação de anotações (Markdown/JSON) e suporte a OCR via Tesseract para PDFs escaneados.
+
+### Mudanças realizadas:
+
+1. **Modelos e Validação (`src/models.rs`)**:
+   - `validate_location`: validação de `color` (string até 32 caracteres) e `quote` / `selected_text` (string até 4096 caracteres), preservando total compatibilidade com posições legadas e esquemas de restauração.
+   - Adicionada estrutura `NoteWithBook` para retorno de notas enriquecidas com título e autor do livro.
+   - Adicionadas estruturas `NotesQuery` (busca por texto, filtro por cor e paginação) e `ExportNotesQuery` (formato `markdown` ou `json`).
+   - Teste unitário em `tests/rust/location-validation.rs` cobrindo aceitação e rejeição de cores e citações inválidas.
+
+2. **Configuração Operacional (`src/config.rs`)**:
+   - Adicionados `ocr_enabled: bool` (padrão `true`, configurável via `OCR_ENABLED`) e `ocr_timeout_seconds: u64` (padrão `15`, delimitado entre 1 e 600 segundos).
+   - Atualizados `compose.yaml`, `.env.example` e `Dockerfile`.
+
+3. **OCR para PDFs Escaneados (`src/readers.rs`)**:
+   - Implementadas `is_tesseract_available()`, `extract_pdf_ocr_sample()` e `extract_text_sample_with_options()`.
+   - Fallback gracioso: quando `lopdf` não encontra camada textual em PDFs (escaneados ou imagens), o sistema verifica a presença do executável `tesseract`; se disponível, rasteriza até 2 páginas temporárias com `pdftoppm` e extrai o texto com OCR sem travar o processo.
+   - Sem dependência obrigatória no host: caso `tesseract` não esteja instalado, a função retorna `None` silenciosamente sem panics ou erros.
+   - Atualizado `Dockerfile` para incluir `tesseract-ocr`, `tesseract-ocr-por` e `tesseract-ocr-eng` no container Debian final.
+
+4. **Banco de Dados SQLite (`src/db.rs`)**:
+   - Implementado método assíncrono `list_all_notes(query: &NotesQuery) -> AppResult<Vec<NoteWithBook>>` com busca parcial em conteúdo e citações, filtro por cor e paginação.
+
+5. **API HTTP e Exportação (`src/api.rs`)**:
+   - Rota `GET /api/notes`: listagem geral ou filtrada de anotações de todos os livros ou de um livro específico.
+   - Rota `GET /api/notes/export?format=markdown|json`: exportação de todas as anotações do acervo com cabeçalho `Content-Disposition` RFC 6266.
+   - Rota `GET /api/books/{id}/notes/export?format=markdown|json`: exportação das notas e destaques de um livro específico.
+   - Rota `GET /api/settings`: informa `ocr_available` e `ocr_enabled`.
+   - `reindex_fts_content`: passa os parâmetros de OCR configurados para a extração do FTS5.
+
+6. **Interface Web (`web/index.html`, `web/styles.css`, `web/app.js`)**:
+   - `web/index.html`:
+     - Cabeçalho do caderno com botões de exportação direta em Markdown (`.md`) e JSON (`.json`).
+     - Barra de ferramentas com busca rápida em tempo real e botões de filtro por cor (Todas, Amarelo, Verde, Azul).
+     - Formulário de anotações com campo de citação/trecho destacado (`#note-quote`) e seletores de cor de marca-texto.
+   - `web/styles.css`:
+     - Estilos visuais para citações destacadas (`.note-quote`) com cores pastel suaves (amarelo, verde, azul).
+     - Marcadores de cor (`.swatch`), filtros clicáveis e links de localização navegáveis.
+   - `web/app.js`:
+     - `loadNotes()` e `renderNotesList()` com suporte a filtro instantâneo por texto e cor.
+     - `jumpToLocation()`: clicar na posição de uma nota navega diretamente para a página (PDF/CBZ) ou capítulo (EPUB) correspondente.
+     - Botão de exportação de notas integrado também aos detalhes do livro (`#book-detail`).
+
+7. **Testes e Documentação**:
+   - `tests/rust/location-validation.rs`: testes para campos de destaque e cor.
+   - `tests/api-e2e.mjs`: testes de ponta a ponta para criação de notas com destaques, listagem com filtros e exportação nos formatos Markdown e JSON.
+   - `tests/browser-e2e.spec.mjs`: teste com Playwright exercitando criação de nota com citação, marca-texto amarelo e filtro no leitor.
+   - `README.md` e `docs/api.md` atualizados com as novas rotas e recursos.
+
+### Verificações realmente executadas:
+- `cargo clippy --locked --all-targets -- -D warnings`: passou sem nenhum aviso (0 warnings).
+- `cargo test --locked`: 42 passaram, 0 falharam, 1 teste de volume ignorado.
+- `npm run test:ui`: aprovado (contrato visual, IDs únicos e gravação de progresso).
+- `npm run test:api`: aprovado (todas as rotas E2E incluindo novas rotas de notas e exportação).
+- `npm run test:auth`: aprovado (saúde pública e proteção HTTP Basic).
+- `npm run test:browser`: aprovado (Playwright E2E browser test completo incluindo notas e destaques).
+
+### Limitações:
+- O OCR processa até 2 páginas por PDF para manter a indexação ágil e não sobrecarregar CPU/disco.
+- Destaques em PDF baseiam-se na página e na citação anotada (o visualizador PDF nativo do navegador controla a camada gráfica do documento).
+
+### Próximo passo:
+- Apresentar o resultado ao usuário e verificar se deseja commit/push.
+
+---
+
 # Checkpoint — 2026-10-15
 
 ## Revisão atual — Busca textual completa com SQLite FTS5

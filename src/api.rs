@@ -27,8 +27,9 @@ use crate::{
     error::{AppError, AppResult},
     maintenance, metadata,
     models::{
-        CatalogQuery, CreateShare, FtsStatus, MetadataCandidate, SaveCollection, SaveNote,
-        SaveProgress, SaveProvider, SearchResponse, UpdateBook,
+        CatalogQuery, CreateShare, ExportNotesQuery, FtsStatus, MetadataCandidate, NoteWithBook,
+        NotesQuery, SaveCollection, SaveNote, SaveProgress, SaveProvider, SearchResponse,
+        UpdateBook,
     },
     opds, readers,
     scanner::{self, ScanEvent, ScanProfile, ScanStatus, SUPPORTED_EXTENSIONS},
@@ -72,6 +73,9 @@ pub fn router(state: AppState) -> Router {
             put(save_progress).delete(remove_progress),
         )
         .route("/books/{id}/notes", get(list_notes).post(create_note))
+        .route("/books/{id}/notes/export", get(export_book_notes))
+        .route("/notes", get(list_all_notes))
+        .route("/notes/export", get(export_all_notes))
         .route("/notes/{id}", delete(delete_note))
         .route("/books/{id}/epub", get(epub_manifest))
         .route("/books/{id}/epub/resource/{*resource}", get(epub_resource))
@@ -223,6 +227,8 @@ struct SettingsResponse {
     carousel_interval_seconds: u64,
     auto_cover_enabled: bool,
     auth_enabled: bool,
+    ocr_available: bool,
+    ocr_enabled: bool,
     branding: BrandingAssets,
     supported_formats: &'static [&'static str],
 }
@@ -272,6 +278,8 @@ async fn get_settings(State(state): State<AppState>) -> AppResult<Json<SettingsR
             .unwrap_or_else(default_carousel_interval),
         auto_cover_enabled: setting_bool(&state, "auto_cover_enabled").await?,
         auth_enabled: state.config.auth_enabled(),
+        ocr_available: readers::is_tesseract_available(),
+        ocr_enabled: state.config.ocr_enabled,
         branding: branding_assets(&state).await?,
         supported_formats: SUPPORTED_EXTENSIONS,
     }))
@@ -934,10 +942,18 @@ async fn reindex_fts_content(
     let root = library_root(&state).await?;
     let pending = state.db.books_needing_fts(limit).await?;
     let mut indexed_count = 0;
+    let ocr_enabled = state.config.ocr_enabled;
+    let ocr_timeout = state.config.ocr_timeout_seconds;
     for (id, relative_path, format, title, author, subjects) in pending {
         let content = match scanner::resolve_book_path(&root, &relative_path) {
-            Ok(full_path) => crate::readers::extract_text_sample(&full_path, &format, 256 * 1024)
-                .unwrap_or_default(),
+            Ok(full_path) => crate::readers::extract_text_sample_with_options(
+                &full_path,
+                &format,
+                256 * 1024,
+                ocr_enabled,
+                ocr_timeout,
+            )
+            .unwrap_or_default(),
             Err(_) => String::new(),
         };
         state
@@ -1124,6 +1140,205 @@ async fn delete_note(
 ) -> AppResult<StatusCode> {
     state.db.delete_note(id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_all_notes(
+    State(state): State<AppState>,
+    Query(query): Query<NotesQuery>,
+) -> AppResult<Json<Value>> {
+    let notes: Vec<NoteWithBook> = state.db.list_all_notes(&query).await?;
+    Ok(Json(json!({ "notes": notes })))
+}
+
+async fn export_book_notes(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<i64>,
+    Query(query): Query<ExportNotesQuery>,
+) -> AppResult<Response> {
+    let book = state.db.book(id).await?;
+    let notes = state.db.notes(id).await?;
+    let format = query.format.unwrap_or_else(|| "markdown".into());
+    if format == "json" {
+        let body = serde_json::to_string_pretty(&json!({
+            "book": {
+                "id": book.id,
+                "title": book.title,
+                "author": book.author,
+                "format": book.format,
+            },
+            "exported_at": Utc::now().to_rfc3339(),
+            "total_notes": notes.len(),
+            "notes": notes,
+        }))
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let filename = format!("anotacoes-{}.json", sanitize_export_title(&book.title));
+        let mut response = Response::new(Body::from(body));
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            content_disposition_header("attachment", &filename),
+        );
+        Ok(response)
+    } else {
+        let md = format_book_notes_markdown(&book.title, book.author.as_deref(), &notes);
+        let filename = format!("anotacoes-{}.md", sanitize_export_title(&book.title));
+        let mut response = Response::new(Body::from(md));
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/markdown; charset=utf-8"),
+        );
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            content_disposition_header("attachment", &filename),
+        );
+        Ok(response)
+    }
+}
+
+async fn export_all_notes(
+    State(state): State<AppState>,
+    Query(query): Query<NotesQuery>,
+    Query(export_query): Query<ExportNotesQuery>,
+) -> AppResult<Response> {
+    let notes = state.db.list_all_notes(&query).await?;
+    let format = export_query.format.unwrap_or_else(|| "markdown".into());
+    if format == "json" {
+        let body = serde_json::to_string_pretty(&json!({
+            "exported_at": Utc::now().to_rfc3339(),
+            "total_notes": notes.len(),
+            "notes": notes,
+        }))
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let filename = "anotacoes-biblioteca.json";
+        let mut response = Response::new(Body::from(body));
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            content_disposition_header("attachment", filename),
+        );
+        Ok(response)
+    } else {
+        let mut md = String::from("# Anotações da Biblioteca — Estante Livre\n\n");
+        md.push_str(&format!(
+            "**Exportado em:** {}\n**Total de anotações:** {}\n\n---\n\n",
+            Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+            notes.len()
+        ));
+        for note in &notes {
+            let loc_str = format_location_label(&note.location);
+            md.push_str(&format!("## {}\n", note.book_title));
+            if let Some(ref a) = note.book_author {
+                md.push_str(&format!("*Autor:* {a} | "));
+            }
+            md.push_str(&format!(
+                "*Posição:* {loc_str} | *Data:* {}\n\n",
+                &note.updated_at[..10.min(note.updated_at.len())]
+            ));
+            if let Some(quote) = note
+                .location
+                .get("quote")
+                .and_then(|v| v.as_str())
+                .or_else(|| note.location.get("selected_text").and_then(|v| v.as_str()))
+            {
+                let color = note
+                    .location
+                    .get("color")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("amarelo");
+                md.push_str(&format!("> \"{quote}\" *(Destaque: {color})*\n\n"));
+            }
+            md.push_str(&format!("{}\n\n---\n\n", note.content));
+        }
+        let filename = "anotacoes-biblioteca.md";
+        let mut response = Response::new(Body::from(md));
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/markdown; charset=utf-8"),
+        );
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            content_disposition_header("attachment", filename),
+        );
+        Ok(response)
+    }
+}
+
+fn sanitize_export_title(title: &str) -> String {
+    let slug: String = title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "livro".into()
+    } else {
+        trimmed.to_lowercase()
+    }
+}
+
+fn format_location_label(location: &serde_json::Value) -> String {
+    if let Some(page) = location.get("page").and_then(|p| p.as_u64()) {
+        format!("Página {page}")
+    } else if let Some(chapter) = location.get("chapter").and_then(|c| c.as_u64()) {
+        format!("Capítulo {}", chapter + 1)
+    } else if let Some(percent) = location.get("percent").and_then(|p| p.as_f64()) {
+        format!("{:.0}%", percent)
+    } else {
+        "Posição inicial".into()
+    }
+}
+
+fn format_book_notes_markdown(
+    title: &str,
+    author: Option<&str>,
+    notes: &[crate::models::Note],
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Anotações: {title}\n\n"));
+    if let Some(a) = author {
+        out.push_str(&format!("**Autor:** {a}\n\n"));
+    }
+    out.push_str(&format!(
+        "**Exportado em:** {}\n\n**Total de anotações:** {}\n\n---\n\n",
+        Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
+        notes.len()
+    ));
+    for note in notes {
+        let loc = format_location_label(&note.location);
+        out.push_str(&format!(
+            "### {loc} — {}\n\n",
+            &note.updated_at[..10.min(note.updated_at.len())]
+        ));
+        if let Some(quote) = note
+            .location
+            .get("quote")
+            .and_then(|v| v.as_str())
+            .or_else(|| note.location.get("selected_text").and_then(|v| v.as_str()))
+        {
+            let color = note
+                .location
+                .get("color")
+                .and_then(|v| v.as_str())
+                .unwrap_or("amarelo");
+            out.push_str(&format!("> \"{quote}\" *(Destaque: {color})*\n\n"));
+        }
+        out.push_str(&format!("{}\n\n---\n\n", note.content));
+    }
+    out
 }
 
 async fn epub_manifest(

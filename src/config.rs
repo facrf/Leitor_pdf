@@ -15,6 +15,8 @@ pub struct Config {
     pub auth_username: Option<String>,
     pub auth_password: Option<String>,
     pub cover_timeout_seconds: u64,
+    pub ocr_enabled: bool,
+    pub ocr_timeout_seconds: u64,
 }
 
 impl Config {
@@ -24,8 +26,17 @@ impl Config {
             .unwrap_or_else(|_| "60".into())
             .parse()
             .map_err(|_| AppError::BadRequest("COVER_TIMEOUT_SECONDS deve ser inteiro".into()))?;
+        let ocr_timeout_seconds = env::var("OCR_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "15".into())
+            .parse()
+            .map_err(|_| AppError::BadRequest("OCR_TIMEOUT_SECONDS deve ser inteiro".into()))?;
+        let ocr_enabled = env::var("OCR_ENABLED")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
         let config = Self {
             cover_timeout_seconds,
+            ocr_enabled,
+            ocr_timeout_seconds,
             bind: env::var("APP_BIND").unwrap_or_else(|_| "0.0.0.0:20000".into()),
             initial_library_root: env::var("LIBRARY_ROOT")
                 .map(PathBuf::from)
@@ -75,6 +86,11 @@ impl Config {
         if !(1..=600).contains(&self.cover_timeout_seconds) {
             return Err(AppError::BadRequest(
                 "COVER_TIMEOUT_SECONDS deve ficar entre 1 e 600".into(),
+            ));
+        }
+        if !(1..=600).contains(&self.ocr_timeout_seconds) {
+            return Err(AppError::BadRequest(
+                "OCR_TIMEOUT_SECONDS deve ficar entre 1 e 600".into(),
             ));
         }
         Ok(())
