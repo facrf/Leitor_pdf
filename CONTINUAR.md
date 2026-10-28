@@ -38,6 +38,12 @@ Implementação e verificação completa das **Etapas 3 e 4** do plano de adoç�
    - `tests/start-browser-server.mjs`: Propagação do `CARGO_TARGET_DIR=target_local`.
    - `README.md` e `docs/api.md`: Documentação das 4 etapas e das novas rotas de curso e legenda.
 
+6. **Refinamento de UX e OPDS Multimídia (`src/opds.rs`, `web/app.js`)**:
+   - `src/opds.rs`: Ampliada `extension_from_mime` para reconhecer mimes de áudio (`audio/mpeg`, `audio/mp4`, `audio/x-m4b`, `audio/ogg`, `audio/opus`, `audio/flac`) e vídeo (`video/mp4`, `video/webm`, `video/x-matroska`). Teste unitário adicionado: `maps_multimedia_mimes_to_extensions`.
+   - `web/app.js`:
+     - Modal de detalhes (`#book-detail`): Habilitado o botão de ação para audiolivros e vídeos com rótulos contextuais (`▶ Ouvir audiolivro / Continuar audição`, `▶ Assistir aula / Continuar assistindo`) e indicador de categoria no topo (`🎧 AUDIOLIVRO`, `🎬 CURSO / VÍDEO`).
+     - Cartões do catálogo e Mesa de Leitura: Rótulos de progresso contextualizados por tipo de mídia (`% ouvido`, `% assistido`, `% lido`).
+
 ### Verificações realmente executadas:
 - `CARGO_TARGET_DIR=target_local cargo clippy --locked --all-targets -- -D warnings`: 0 warnings, 0 erros.
 - `CARGO_TARGET_DIR=target_local cargo test --locked`: 52 testes passaram (0 falhas, 1 teste de volume ignorado).

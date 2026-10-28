@@ -87,15 +87,26 @@ function renderBooks() {
   grid.classList.toggle('hidden', state.books.length === 0);
   const filtered = Object.values(state.filters).some(Boolean);
   $('#empty-message').textContent = filtered ? 'Nenhum livro corresponde aos filtros escolhidos.' : 'Adicione um livro ou faça uma varredura da pasta configurada.';
-  grid.innerHTML = state.books.map(book => `
+  grid.innerHTML = state.books.map(book => {
+    const isAudio = book.media_type === 'audiobook' || ['m4b','mp3','m4a','ogg','opus','flac'].includes(book.format);
+    const isVideo = book.media_type === 'video' || ['mp4','webm','mkv','m4v'].includes(book.format);
+    const progressLabel = !book.progress_percent
+      ? 'Ainda não iniciado'
+      : isAudio
+      ? `${Math.round(book.progress_percent)}% ouvido`
+      : isVideo
+      ? `${Math.round(book.progress_percent)}% assistido`
+      : `${Math.round(book.progress_percent)}% lido`;
+    return `
     <article class="book-card" data-book-id="${book.id}" tabindex="0" aria-label="Abrir ${escapeHtml(book.title)}">
       ${coverMarkup(book)}
       <div class="book-info"><h3>${escapeHtml(book.title)}</h3><p>${escapeHtml(book.author || book.filename)}</p>
         ${book.subjects?.length ? `<small class="subject-label">${escapeHtml(book.subjects.slice(0, 2).join(' · '))}</small>` : ''}
         <div class="progress-track"><i style="width:${Math.max(0, Math.min(100, book.progress_percent))}%"></i></div>
-        <small class="progress-label">${book.progress_percent ? `${Math.round(book.progress_percent)}% lido` : 'Ainda não iniciado'}</small>
+        <small class="progress-label">${progressLabel}</small>
       </div>
-    </article>`).join('');
+    </article>`;
+  }).join('');
 }
 
 function renderFilters() {
@@ -150,14 +161,23 @@ async function loadReadingDesk() {
 function renderReadingDesk() {
   const section = $('#reading-desk');
   section.classList.toggle('hidden', state.desk.length === 0);
-  $('#reading-desk-list').innerHTML = state.desk.map(book => `
+  $('#reading-desk-list').innerHTML = state.desk.map(book => {
+    const isAudio = book.media_type === 'audiobook' || ['m4b','mp3','m4a','ogg','opus','flac'].includes(book.format);
+    const isVideo = book.media_type === 'video' || ['mp4','webm','mkv','m4v'].includes(book.format);
+    const deskStatus = isAudio
+      ? `${Math.round(book.progress_percent)}% OUVIDO`
+      : isVideo
+      ? `${Math.round(book.progress_percent)}% ASSISTIDO`
+      : `${Math.round(book.progress_percent)}% LIDO`;
+    return `
     <article class="desk-book" data-book-id="${book.id}" tabindex="0">
       ${coverMarkup(book)}
-      <div class="desk-book-copy"><small>${Math.round(book.progress_percent)}% LIDO</small><h3>${escapeHtml(book.title)}</h3><p>${escapeHtml(book.author || book.filename)}</p>
+      <div class="desk-book-copy"><small>${deskStatus}</small><h3>${escapeHtml(book.title)}</h3><p>${escapeHtml(book.author || book.filename)}</p>
         <div class="progress-track"><i style="width:${book.progress_percent}%"></i></div>
       </div>
       <button class="desk-remove" type="button" data-desk-remove="${book.id}" aria-label="Retirar ${escapeHtml(book.title)} da mesa">×</button>
-    </article>`).join('');
+    </article>`;
+  }).join('');
 }
 
 async function removeFromDesk(id) {
@@ -232,22 +252,32 @@ async function openBook(id) {
 
 function detailMarkup(book) {
   const canRead = ['pdf','epub','mobi','azw','azw3','cbz','txt','md','html','htm','fb2'].includes(book.format);
+  const isAudio = book.media_type === 'audiobook' || ['m4b','mp3','m4a','ogg','opus','flac'].includes(book.format);
+  const isVideo = book.media_type === 'video' || ['mp4','webm','mkv','m4v'].includes(book.format);
+  const canPlay = canRead || isAudio || isVideo;
+  const actionLabel = isAudio
+    ? (book.progress?.percent ? 'Continuar audição' : 'Ouvir audiolivro')
+    : isVideo
+    ? (book.progress?.percent ? 'Continuar assistindo' : 'Assistir aula / vídeo')
+    : (book.progress?.percent ? 'Continuar leitura' : 'Começar a ler');
+  const categoryLabel = isAudio ? '🎧 AUDIOLIVRO' : isVideo ? '🎬 CURSO / VÍDEO' : '📚 LIVRO';
+  const progressUnit = isAudio ? 'ouvido' : isVideo ? 'assistido' : 'lido';
   const providers = state.providers.filter(item => item.enabled).map(item => `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join('');
   return `<div class="book-detail-layout">
     <div class="detail-cover-area">${coverMarkup(book, true)}</div>
     <div class="detail-body">
-      <p class="eyebrow">${escapeHtml(book.format.toUpperCase())} · ${formatBytes(book.size)}</p>
+      <p class="eyebrow">${categoryLabel} · ${escapeHtml(book.format.toUpperCase())} · ${formatBytes(book.size)}</p>
       <h2>${escapeHtml(book.title)}</h2><p class="detail-author">${escapeHtml(book.author || 'Autor não informado')}</p>
       <p class="detail-description">${escapeHtml(book.description || 'Sem sinopse. Você pode editar os dados manualmente ou buscar metadados em uma fonte habilitada.')}</p>
       <div class="detail-actions">
-        <button class="button primary" id="read-book" ${canRead && book.is_available ? '' : 'disabled'}>▶ ${book.progress?.percent ? 'Continuar leitura' : 'Começar a ler'}</button>
+        <button class="button primary" id="read-book" ${canPlay && book.is_available ? '' : 'disabled'}>▶ ${actionLabel}</button>
         <a class="button ghost" href="/api/books/${book.id}/file?download=true">⇩ Baixar</a>
         <a class="button ghost" href="/api/books/${book.id}/notes/export?format=markdown" download>✎ Notas (.md)</a>
         <button class="button ghost" id="share-book">↗ Compartilhar</button>
         <button class="button ghost" id="edit-book">✎ Editar</button>
       </div>
       <div class="metadata-grid">
-        <div><span>Arquivo</span>${escapeHtml(book.filename)}</div><div><span>Progresso</span>${Math.round(book.progress?.percent || 0)}%</div>
+        <div><span>Arquivo</span>${escapeHtml(book.filename)}</div><div><span>Progresso</span>${Math.round(book.progress?.percent || 0)}% ${book.progress?.percent ? progressUnit : ''}</div>
         <div><span>Editora</span>${escapeHtml(book.publisher || '—')}</div><div><span>Publicação</span>${escapeHtml(book.published_date || '—')}</div>
         <div><span>ISBN</span>${escapeHtml(book.isbn || '—')}</div><div><span>Idioma</span>${escapeHtml(book.language || '—')}</div>
       </div>

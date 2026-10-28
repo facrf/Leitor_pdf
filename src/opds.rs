@@ -231,6 +231,15 @@ fn extension_from_mime(value: &str) -> Option<&'static str> {
         "application/vnd.comicbook+zip" => Some("cbz"),
         "text/plain" => Some("txt"),
         "text/html" => Some("html"),
+        "audio/mpeg" => Some("mp3"),
+        "audio/mp4" | "audio/x-m4a" => Some("m4a"),
+        "audio/x-m4b" => Some("m4b"),
+        "audio/ogg" => Some("ogg"),
+        "audio/opus" => Some("opus"),
+        "audio/flac" | "audio/x-flac" => Some("flac"),
+        "video/mp4" => Some("mp4"),
+        "video/webm" => Some("webm"),
+        "video/x-matroska" => Some("mkv"),
         _ => None,
     }
 }
@@ -258,5 +267,13 @@ mod tests {
     fn sanitizes_opds_filenames_and_xml() {
         assert_eq!(safe_filename_stem("Livro: teste/ok"), "Livro_ teste_ok");
         assert_eq!(escape_xml("A & <B>"), "A &amp; &lt;B&gt;");
+    }
+
+    #[test]
+    fn maps_multimedia_mimes_to_extensions() {
+        assert_eq!(extension_from_mime("audio/mpeg"), Some("mp3"));
+        assert_eq!(extension_from_mime("audio/x-m4b"), Some("m4b"));
+        assert_eq!(extension_from_mime("video/mp4"), Some("mp4"));
+        assert_eq!(extension_from_mime("video/webm"), Some("webm"));
     }
 }
