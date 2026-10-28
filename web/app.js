@@ -2,7 +2,7 @@ const state = {
   catalog: { total: 0, limit: 60, offset: 0, requestId: 0 },
   books: [], facets: { formats: [], authors: [], subjects: [] }, desk: [], suggestions: [],
   settings: null, providers: [], collections: [], bookCollectionIds: [], currentBook: null,
-  filters: { q: '', format: '', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '', content_only: '' },
+  filters: { q: '', format: '', media_type: 'book', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '', content_only: '' },
   reader: { kind: null, location: {}, percent: 0, items: [] },
   searchTimer: null, scanTimer: null, scanObservedRunning: false,
   carouselIndex: 0, carouselTimer: null,
@@ -120,7 +120,22 @@ function renderFilters() {
   $('#filter-max-size').value = state.filters.max_size ? Math.round(Number(state.filters.max_size) / 1024 / 1024) : '';
   $('#filter-sort').value = state.filters.sort || 'title';
   $('#filter-search-mode').value = state.filters.content_only ? 'content' : '';
-  $('#clear-filters').classList.toggle('hidden', !Object.values(state.filters).some(Boolean));
+  if (state.facets?.media_counts) {
+    const mc = state.facets.media_counts;
+    const badgeBooks = $('#badge-books');
+    const badgeAudio = $('#badge-audiobooks');
+    const badgeVideo = $('#badge-videos');
+    if (badgeBooks) badgeBooks.textContent = mc.books || 0;
+    if (badgeAudio) badgeAudio.textContent = mc.audiobooks || 0;
+    if (badgeVideo) badgeVideo.textContent = mc.videos || 0;
+  }
+  $$('.media-tab-btn').forEach(btn => {
+    const active = btn.dataset.mediaType === (state.filters.media_type || 'book');
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  const hasExtraFilters = Object.entries(state.filters).some(([k, v]) => k !== 'media_type' && Boolean(v));
+  $('#clear-filters').classList.toggle('hidden', !hasExtraFilters);
 }
 
 async function loadReadingDesk() {
@@ -371,8 +386,130 @@ async function renderReader() {
       const endpoint = ['mobi','azw','azw3'].includes(book.format) ? 'mobi' : 'text';
       stage.innerHTML = `<iframe title="Leitor de texto" sandbox src="/api/books/${book.id}/${endpoint}"></iframe>`;
       renderPercentNavigation();
+    } else if (['m4b','mp3','m4a','ogg','opus','flac'].includes(book.format)) {
+      renderAudioPlayer();
+    } else if (['mp4','webm','mkv','m4v'].includes(book.format)) {
+      renderVideoPlayer();
     } else throw new Error(`Leitura de ${book.format} ainda não disponível.`);
   } catch (error) { stage.innerHTML = `<div class="reader-error"><h2>Não foi possível abrir este livro</h2><p>${escapeHtml(error.message)}</p><a class="button light" href="/api/books/${book.id}/file?download=true">Baixar arquivo</a></div>`; }
+}
+
+function formatTime(seconds) {
+  if (!seconds || isNaN(seconds)) return '00:00';
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = val => String(val).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+function renderAudioPlayer() {
+  const book = state.currentBook, stage = $('#reader-stage'), nav = $('#reader-navigation');
+  const savedTime = Number(state.reader.location.time || 0);
+  stage.innerHTML = `
+    <div class="media-player-container audio-player-view">
+      <div class="media-cover-wrapper">
+        ${coverMarkup(book)}
+      </div>
+      <div class="media-info">
+        <h2>${escapeHtml(book.title)}</h2>
+        <p>${escapeHtml(book.author || book.filename)}</p>
+      </div>
+      <audio id="media-audio-element" controls preload="metadata" src="/api/books/${book.id}/file">
+        Seu navegador não suporta a reprodução deste áudio.
+      </audio>
+    </div>`;
+  nav.innerHTML = `
+    <button class="icon-button light" id="audio-step-back" type="button" title="Voltar 15s">↺ 15s</button>
+    <label>Velocidade:
+      <select id="audio-speed-select">
+        <option value="0.75">0.75x</option>
+        <option value="1" selected>1x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="2">2x</option>
+      </select>
+    </label>
+    <button class="icon-button light" id="audio-step-fwd" type="button" title="Avançar 30s">↻ 30s</button>
+  `;
+  const audio = $('#media-audio-element');
+  if (audio) {
+    if (savedTime > 0) {
+      audio.onloadedmetadata = () => {
+        audio.currentTime = savedTime;
+        updateMediaProgress(audio, 'audio');
+      };
+    }
+    audio.ontimeupdate = () => updateMediaProgress(audio, 'audio');
+    audio.onpause = () => scheduleProgressSave(true);
+  }
+  $('#audio-speed-select')?.addEventListener('change', e => {
+    if (audio) audio.playbackRate = Number(e.target.value);
+  });
+  $('#audio-step-back')?.addEventListener('click', () => {
+    if (audio) audio.currentTime = Math.max(0, audio.currentTime - 15);
+  });
+  $('#audio-step-fwd')?.addEventListener('click', () => {
+    if (audio) audio.currentTime = Math.min(audio.duration || Infinity, audio.currentTime + 30);
+  });
+  updateReaderLabel();
+}
+
+function renderVideoPlayer() {
+  const book = state.currentBook, stage = $('#reader-stage'), nav = $('#reader-navigation');
+  const savedTime = Number(state.reader.location.time || 0);
+  stage.innerHTML = `
+    <div class="media-player-container video-player-view">
+      <video id="media-video-element" controls preload="metadata" playsinline src="/api/books/${book.id}/file">
+        Seu navegador não suporta a reprodução deste vídeo.
+      </video>
+    </div>`;
+  nav.innerHTML = `
+    <button class="icon-button light" id="video-step-back" type="button" title="Voltar 10s">↺ 10s</button>
+    <label>Velocidade:
+      <select id="video-speed-select">
+        <option value="0.75">0.75x</option>
+        <option value="1" selected>1x</option>
+        <option value="1.25">1.25x</option>
+        <option value="1.5">1.5x</option>
+        <option value="2">2x</option>
+      </select>
+    </label>
+    <button class="icon-button light" id="video-step-fwd" type="button" title="Avançar 10s">↻ 10s</button>
+  `;
+  const video = $('#media-video-element');
+  if (video) {
+    if (savedTime > 0) {
+      video.onloadedmetadata = () => {
+        video.currentTime = savedTime;
+        updateMediaProgress(video, 'video');
+      };
+    }
+    video.ontimeupdate = () => updateMediaProgress(video, 'video');
+    video.onpause = () => scheduleProgressSave(true);
+  }
+  $('#video-speed-select')?.addEventListener('change', e => {
+    if (video) video.playbackRate = Number(e.target.value);
+  });
+  $('#video-step-back')?.addEventListener('click', () => {
+    if (video) video.currentTime = Math.max(0, video.currentTime - 10);
+  });
+  $('#video-step-fwd')?.addEventListener('click', () => {
+    if (video) video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
+  });
+  updateReaderLabel();
+}
+
+function updateMediaProgress(media, type) {
+  if (!media) return;
+  const time = media.currentTime || 0;
+  const duration = media.duration && !isNaN(media.duration) ? media.duration : 0;
+  const percent = duration > 0 ? Math.min(100, Math.max(0, (time / duration) * 100)) : 0;
+  state.reader.percent = percent;
+  state.reader.location = { type, time, duration };
+  updateReaderLabel();
+  scheduleProgressSave();
 }
 
 function changePdfPage(step) {
@@ -410,7 +547,15 @@ function renderPercentNavigation() {
 
 function updateReaderLabel() {
   const location = state.reader.location;
-  $('#reader-location').textContent = location.page ? `Página ${location.page} · ${Math.round(state.reader.percent)}%` : location.type === 'chapter' ? `Capítulo ${location.chapter + 1} · ${Math.round(state.reader.percent)}%` : `${Math.round(state.reader.percent)}% lido`;
+  if (location.page) {
+    $('#reader-location').textContent = `Página ${location.page} · ${Math.round(state.reader.percent)}%`;
+  } else if (location.type === 'chapter') {
+    $('#reader-location').textContent = `Capítulo ${location.chapter + 1} · ${Math.round(state.reader.percent)}%`;
+  } else if (location.type === 'audio' || location.type === 'video') {
+    $('#reader-location').textContent = `${formatTime(location.time || 0)} / ${formatTime(location.duration || 0)} · ${Math.round(state.reader.percent)}%`;
+  } else {
+    $('#reader-location').textContent = `${Math.round(state.reader.percent)}% lido`;
+  }
 }
 
 function scheduleProgressSave(immediate = false) {
@@ -629,6 +774,9 @@ function jumpToLocation(loc) {
       slider.dispatchEvent(new Event('input'));
       slider.dispatchEvent(new Event('change'));
     }
+  } else if (loc.time !== undefined) {
+    const media = $('#media-audio-element') || $('#media-video-element');
+    if (media) media.currentTime = Number(loc.time);
   }
 }
 
@@ -636,11 +784,14 @@ function locationLabel(location = {}) {
   location ||= {};
   if (location.type === 'chapter') return `Capítulo ${Number(location.chapter) + 1}`;
   if (location.type === 'page') return `Página ${location.page}`;
+  if (location.time !== undefined) return formatTime(location.time);
   return `${Math.round(location.percent || 0)}%`;
 }
 
 async function closeReader() {
   clearTimeout(state.progressSaveTimer);
+  const media = $('#media-audio-element') || $('#media-video-element');
+  if (media) media.pause();
   await persistProgress();
   $('#reader').classList.add('hidden'); $('#notes-panel').classList.remove('open'); document.body.style.overflow = '';
   await Promise.all([loadBooks($('#search').value), loadReadingDesk(), loadSuggestions()]);
@@ -1011,7 +1162,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#filter-sort').onchange = event => { state.filters.sort = event.target.value === 'title' ? '' : event.target.value; loadBooks(); };
   $('#filter-search-mode').onchange = event => { state.filters.content_only = event.target.value === 'content' ? 'true' : ''; loadBooks(); };
   [['#filter-min-size','min_size'], ['#filter-max-size','max_size']].forEach(([selector, key]) => { $(selector).onchange = event => { state.filters[key] = event.target.value ? String(Math.round(Number(event.target.value) * 1024 * 1024)) : ''; loadBooks(); }; });
-  $('#clear-filters').onclick = () => { state.filters = { q: '', format: '', author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '', content_only: '' }; $('#search').value = ''; loadBooks(''); };
+  $('#clear-filters').onclick = () => { state.filters = { q: '', format: '', media_type: state.filters.media_type, author: '', subject: '', publisher: '', language: '', year: '', min_size: '', max_size: '', progress: '', availability: '', collection_id: '', sort: '', content_only: '' }; $('#search').value = ''; loadBooks(''); };
+  $$('.media-tab-btn').forEach(btn => {
+    btn.onclick = () => {
+      $$('.media-tab-btn').forEach(b => {
+        b.classList.remove('active');
+        b.setAttribute('aria-selected', 'false');
+      });
+      btn.classList.add('active');
+      btn.setAttribute('aria-selected', 'true');
+      state.filters.media_type = btn.dataset.mediaType || 'book';
+      state.filters.format = '';
+      $('#filter-format').value = '';
+      state.catalog.offset = 0;
+      loadBooks(state.filters.q, 0);
+    };
+  });
   $$('.view-switch button').forEach(button => button.onclick = () => { $$('.view-switch button').forEach(item => item.classList.remove('active')); button.classList.add('active'); $('#book-grid').classList.toggle('list', button.dataset.view === 'list'); });
   $('#catalog-previous').onclick = () => loadBooks(state.filters.q, Math.max(0, state.catalog.offset - state.catalog.limit));
   $('#catalog-next').onclick = () => loadBooks(state.filters.q, state.catalog.offset + state.catalog.limit);

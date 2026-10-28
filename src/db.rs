@@ -384,6 +384,7 @@ impl Database {
             let offset = query.offset.unwrap_or(0);
             let search = format!("%{}%", query.q.as_deref().unwrap_or_default().trim());
             let format = query.format.as_deref().unwrap_or_default().trim();
+            let media_type = query.media_type.as_deref().unwrap_or_default().trim();
             let author = query.author.as_deref().unwrap_or_default().trim();
             let subject = query.subject.as_deref().unwrap_or_default().trim();
             let publisher = query.publisher.as_deref().unwrap_or_default().trim();
@@ -429,7 +430,10 @@ impl Database {
                    AND (?12 IS NULL OR EXISTS (
                         SELECT 1 FROM collection_books cb
                         WHERE cb.book_id = b.id AND cb.collection_id = ?12
-                   ))"
+                   ))
+                   AND (?14 = '' OR (?14 = 'audiobook' AND b.format IN ('m4b', 'mp3', 'm4a', 'ogg', 'opus', 'flac'))
+                        OR (?14 = 'video' AND b.format IN ('mp4', 'webm', 'mkv', 'm4v'))
+                        OR (?14 = 'book' AND b.format NOT IN ('m4b', 'mp3', 'm4a', 'ogg', 'opus', 'flac', 'mp4', 'webm', 'mkv', 'm4v')))"
             );
             let sql = format!(
                 "SELECT b.id, b.title, b.author, b.filename, b.format, b.subjects,
@@ -451,13 +455,14 @@ impl Database {
                 availability,
                 query.collection_id,
                 fts_query,
+                media_type,
             ];
             let total = conn.query_row(
                 &format!("SELECT COUNT(*) {filter_sql}"),
                 parameters,
                 |row| row.get(0),
             )?;
-            let mut stmt = conn.prepare(&format!("{sql} LIMIT ?14 OFFSET ?15"))?;
+            let mut stmt = conn.prepare(&format!("{sql} LIMIT ?15 OFFSET ?16"))?;
             let rows = stmt.query_map(
                 params![
                     search,
@@ -473,6 +478,7 @@ impl Database {
                     availability,
                     query.collection_id,
                     fts_query,
+                    media_type,
                     limit,
                     offset,
                 ],
@@ -715,6 +721,22 @@ impl Database {
                     years.push(value?);
                 }
                 let collections = query_collections(conn)?;
+                let (books_count, audiobooks_count, videos_count): (usize, usize, usize) = conn
+                    .query_row(
+                        "SELECT
+                            COALESCE(SUM(CASE WHEN format NOT IN ('m4b', 'mp3', 'm4a', 'ogg', 'opus', 'flac', 'mp4', 'webm', 'mkv', 'm4v') THEN 1 ELSE 0 END), 0),
+                            COALESCE(SUM(CASE WHEN format IN ('m4b', 'mp3', 'm4a', 'ogg', 'opus', 'flac') THEN 1 ELSE 0 END), 0),
+                            COALESCE(SUM(CASE WHEN format IN ('mp4', 'webm', 'mkv', 'm4v') THEN 1 ELSE 0 END), 0)
+                         FROM books WHERE is_available=1",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .unwrap_or((0, 0, 0));
+                let media_counts = crate::models::MediaCounts {
+                    books: books_count,
+                    audiobooks: audiobooks_count,
+                    videos: videos_count,
+                };
                 Ok(CatalogFacets {
                     formats,
                     authors,
@@ -723,6 +745,7 @@ impl Database {
                     languages,
                     years,
                     collections,
+                    media_counts,
                 })
             })
             .await
@@ -1334,6 +1357,8 @@ impl Database {
 
 fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<Book> {
     let subjects: String = row.get(8)?;
+    let format: String = row.get(11)?;
+    let media_type = crate::scanner::media_type_for_format(&format).to_string();
     Ok(Book {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -1346,7 +1371,8 @@ fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<Book> {
         subjects: serde_json::from_str(&subjects).unwrap_or_default(),
         filename: row.get(9)?,
         relative_path: row.get(10)?,
-        format: row.get(11)?,
+        format,
+        media_type,
         size: row.get(12)?,
         modified_at: row.get(13)?,
         page_count: row.get(14)?,
@@ -1360,12 +1386,15 @@ fn row_to_book(row: &rusqlite::Row<'_>) -> rusqlite::Result<Book> {
 
 fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookSummary> {
     let subjects: String = row.get(5)?;
+    let format: String = row.get(4)?;
+    let media_type = crate::scanner::media_type_for_format(&format).to_string();
     Ok(BookSummary {
         id: row.get(0)?,
         title: row.get(1)?,
         author: row.get(2)?,
         filename: row.get(3)?,
-        format: row.get(4)?,
+        format,
+        media_type,
         subjects: serde_json::from_str(&subjects).unwrap_or_default(),
         publisher: row.get(6)?,
         published_date: row.get(7)?,

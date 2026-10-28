@@ -2010,7 +2010,22 @@ async fn stream_file(
             | "image/x-icon"
             | "image/vnd.microsoft.icon"
             | "text/plain"
-    );
+            | "audio/mpeg"
+            | "audio/mp4"
+            | "audio/x-m4a"
+            | "audio/m4a"
+            | "audio/ogg"
+            | "audio/flac"
+            | "audio/x-flac"
+            | "audio/opus"
+            | "audio/wav"
+            | "video/mp4"
+            | "video/webm"
+            | "video/ogg"
+            | "video/x-matroska"
+            | "video/quicktime"
+    ) || mime.starts_with("audio/")
+        || mime.starts_with("video/");
     let disposition = if download || !inline_safe {
         "attachment"
     } else {

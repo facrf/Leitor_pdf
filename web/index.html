@@ -29,7 +29,7 @@
       <button class="button primary" id="upload-button" type="button"><span aria-hidden="true">＋</span><span>Adicionar</span></button>
       <button class="icon-button" id="settings-button" type="button" aria-label="Configurações">⚙</button>
     </nav>
-    <input id="upload-input" type="file" hidden accept=".pdf,.epub,.mobi,.azw,.azw3,.cbz,.txt,.md,.html,.htm,.fb2">
+    <input id="upload-input" type="file" hidden accept=".pdf,.epub,.mobi,.azw,.azw3,.cbz,.txt,.md,.html,.htm,.fb2,.m4b,.mp3,.m4a,.ogg,.opus,.flac,.mp4,.webm,.mkv,.m4v,audio/*,video/*">
   </header>
 
   <aside id="scan-progress" class="scan-progress hidden" aria-live="polite">
@@ -83,6 +83,24 @@
         <button type="button" data-view="list" aria-label="Lista">☷</button>
       </div>
     </section>
+
+    <nav class="media-tabs" role="tablist" aria-label="Categorias do acervo">
+      <button type="button" class="media-tab-btn active" id="tab-books" data-media-type="book" role="tab" aria-selected="true">
+        <span class="tab-icon" aria-hidden="true">📚</span>
+        <span class="tab-label">Livros</span>
+        <span class="tab-badge" id="badge-books">0</span>
+      </button>
+      <button type="button" class="media-tab-btn" id="tab-audiobooks" data-media-type="audiobook" role="tab" aria-selected="false">
+        <span class="tab-icon" aria-hidden="true">🎧</span>
+        <span class="tab-label">Audiolivros</span>
+        <span class="tab-badge" id="badge-audiobooks">0</span>
+      </button>
+      <button type="button" class="media-tab-btn" id="tab-videos" data-media-type="video" role="tab" aria-selected="false">
+        <span class="tab-icon" aria-hidden="true">🎬</span>
+        <span class="tab-label">Cursos em Vídeo</span>
+        <span class="tab-badge" id="badge-videos">0</span>
+      </button>
+    </nav>
 
     <section class="catalog-filters" aria-label="Filtros do catálogo">
       <label><span>Tipo</span><select id="filter-format"><option value="">Todos os formatos</option></select></label>

@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { rm, cp } from 'node:fs/promises';
 
+process.env.CARGO_TARGET_DIR = process.env.CARGO_TARGET_DIR || 'target_local';
+
 const testFile = process.argv[2];
 if (!testFile?.startsWith('tests/') || !testFile.endsWith('.mjs')) {
   throw new Error('informe um teste JavaScript dentro de tests/');
@@ -26,6 +28,7 @@ const server = spawn('cargo', ['run', '--locked'], {
     BACKUP_DIR: `${runtimeDirectory}/backups`,
     AUTH_USERNAME: authScenario ? 'facrf' : '',
     AUTH_PASSWORD: authScenario ? 'segredo-e2e' : '',
+    CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || 'target_local',
     RUST_LOG: 'estante_livre=info',
   },
 });

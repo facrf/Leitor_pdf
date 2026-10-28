@@ -7,6 +7,7 @@ pub struct BookSummary {
     pub author: Option<String>,
     pub filename: String,
     pub format: String,
+    pub media_type: String,
     pub subjects: Vec<String>,
     pub publisher: Option<String>,
     pub published_date: Option<String>,
@@ -16,6 +17,13 @@ pub struct BookSummary {
     pub has_cover: bool,
     pub progress_percent: f64,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MediaCounts {
+    pub books: usize,
+    pub audiobooks: usize,
+    pub videos: usize,
 }
 
 /// Valores disponiveis para organizar e filtrar a estante.
@@ -28,12 +36,14 @@ pub struct CatalogFacets {
     pub languages: Vec<String>,
     pub years: Vec<String>,
     pub collections: Vec<Collection>,
+    pub media_counts: MediaCounts,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CatalogQuery {
     pub q: Option<String>,
     pub format: Option<String>,
+    pub media_type: Option<String>,
     pub author: Option<String>,
     pub subject: Option<String>,
     pub publisher: Option<String>,
@@ -148,6 +158,7 @@ pub struct Book {
     pub filename: String,
     pub relative_path: String,
     pub format: String,
+    pub media_type: String,
     pub size: i64,
     pub modified_at: i64,
     pub page_count: Option<i64>,
@@ -300,6 +311,18 @@ pub fn validate_location(location: &serde_json::Value) -> crate::error::AppResul
             if value.as_u64().is_none_or(|number| {
                 number > 9_007_199_254_740_991 || (key == "page" && number == 0)
             }) {
+                return Err(AppError::BadRequest(format!(
+                    "campo {key} da posicao invalido"
+                )));
+            }
+        }
+    }
+    for key in ["time", "duration"] {
+        if let Some(value) = location.get(key) {
+            if value
+                .as_f64()
+                .is_none_or(|number| !number.is_finite() || number < 0.0)
+            {
                 return Err(AppError::BadRequest(format!(
                     "campo {key} da posicao invalido"
                 )));

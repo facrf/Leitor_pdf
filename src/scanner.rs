@@ -15,9 +15,35 @@ use zip::ZipArchive;
 
 use crate::error::{AppError, AppResult};
 
-pub const SUPPORTED_EXTENSIONS: &[&str] = &[
+#[allow(dead_code)]
+pub const BOOK_EXTENSIONS: &[&str] = &[
     "pdf", "epub", "mobi", "azw", "azw3", "cbz", "txt", "md", "html", "htm", "fb2",
 ];
+
+pub const AUDIO_EXTENSIONS: &[&str] = &[
+    "m4b", "mp3", "m4a", "ogg", "opus", "flac",
+];
+
+pub const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "webm", "mkv", "m4v",
+];
+
+pub const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "pdf", "epub", "mobi", "azw", "azw3", "cbz", "txt", "md", "html", "htm", "fb2",
+    "m4b", "mp3", "m4a", "ogg", "opus", "flac",
+    "mp4", "webm", "mkv", "m4v",
+];
+
+pub fn media_type_for_format(format: &str) -> &'static str {
+    let lower = format.to_ascii_lowercase();
+    if AUDIO_EXTENSIONS.contains(&lower.as_str()) {
+        "audiobook"
+    } else if VIDEO_EXTENSIONS.contains(&lower.as_str()) {
+        "video"
+    } else {
+        "book"
+    }
+}
 
 /// Perfil de custo da indexacao. O perfil economico evita abrir o conteudo dos
 /// livros; os demais limitam o ciclo de trabalho do unico worker de varredura.

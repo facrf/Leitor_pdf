@@ -236,3 +236,56 @@ async fn fts5_indexing_and_search_regression() {
     let status_removed = db.fts_status().await.unwrap();
     assert_eq!(status_removed.indexed_books, 0);
 }
+
+#[tokio::test]
+async fn media_types_filter_and_count_correctly() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA).unwrap();
+    migrate(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO books(id,title,filename,relative_path,format,size,modified_at,created_at,updated_at)
+         VALUES (1,'Livro PDF','livro.pdf','livro.pdf','pdf',100,1,'now','now'),
+                (2,'Audio Livro','audio.m4b','audio.m4b','m4b',200,1,'now','now'),
+                (3,'Musica MP3','aula.mp3','aula.mp3','mp3',300,1,'now','now'),
+                (4,'Video Aula','aula.mp4','aula.mp4','mp4',400,1,'now','now')",
+        [],
+    ).unwrap();
+    let db = Database::from_connection(conn).unwrap();
+
+    let facets = db.catalog_facets().await.unwrap();
+    assert_eq!(facets.media_counts.books, 1);
+    assert_eq!(facets.media_counts.audiobooks, 2);
+    assert_eq!(facets.media_counts.videos, 1);
+
+    let books = db
+        .list_books(&CatalogQuery {
+            media_type: Some("book".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(books.total, 1);
+    assert_eq!(books.books[0].format, "pdf");
+    assert_eq!(books.books[0].media_type, "book");
+
+    let audiobooks = db
+        .list_books(&CatalogQuery {
+            media_type: Some("audiobook".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(audiobooks.total, 2);
+    assert!(audiobooks.books.iter().all(|b| b.media_type == "audiobook"));
+
+    let videos = db
+        .list_books(&CatalogQuery {
+            media_type: Some("video".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(videos.total, 1);
+    assert_eq!(videos.books[0].format, "mp4");
+    assert_eq!(videos.books[0].media_type, "video");
+}

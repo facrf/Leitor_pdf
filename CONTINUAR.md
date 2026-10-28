@@ -1,25 +1,50 @@
 # Checkpoint — 2026-10-28
 
-## Revisão atual — Documentação do Plano de Adoção de Audiolivros e Cursos em Vídeo e Início da Etapa 1
+## Revisão atual — Plano de Adoção e Conclusão da Etapa 1 (Audiolivros e Vídeos em Abas Separadas)
 
-Criação da documentação arquitetural e de adoção em etapas para expansão da biblioteca multimídia com suporte a audiolivros e cursos em vídeo em abas separadas (`docs/PLANO_AUDIOLIVROS_E_VIDEOS.md`), integração no `README.md` e consolidação das melhorias de auditoria e resiliência.
+Elaboração do plano em etapas (`docs/PLANO_AUDIOLIVROS_E_VIDEOS.md`), commit & push para o repositório remoto, e implementação completa da **Etapa 1**: fundação de mídias, extensão do scanner, streaming inline com Range Requests, filtro de categoria `media_type`, contadores de mídia nas facetas, navegação por abas na interface e reprodutores dedicados para áudio e vídeo com sincronização de progresso.
 
 ### Mudanças realizadas:
+
 1. **Documentação Arquitetural e Plano em Etapas (`docs/PLANO_AUDIOLIVROS_E_VIDEOS.md`, `README.md`)**:
-   - Definição do escopo das 4 etapas de implementação (Etapa 1: Fundação, Abas e Streaming Inline; Etapa 2: Player de Audiolivro e MediaSession; Etapa 3: Player de Cursos em Vídeo e Aulas por Módulos; Etapa 4: Thumbnails e Legendas).
+   - Definição do escopo das 4 etapas de implementação (Etapa 1: Fundação, Abas e Streaming Inline; Etapa 2: Player Especializado de Audiolivro e MediaSession; Etapa 3: Player de Cursos em Vídeo e Aulas por Módulos; Etapa 4: Thumbnails e Legendas).
    - Matriz de compatibilidade de formatos de áudio (`mp3`, `m4a`, `m4b`, `ogg`, `opus`, `flac`) e vídeo (`mp4`, `webm`, `mkv`, `m4v`).
-   - Mapeamento das estruturas de persistência para `reading_progress` e `notes` com timecodes.
-   - Referenciado no `README.md`.
-2. **Auditoria de Resiliência e UX**:
-   - Consolidação de timeouts de OCR, offloading Tokio com `spawn_blocking`, restauração de pastas pai na lixeira e melhorias de UX.
+   - Sincronização documentada e enviada via `git push origin main`.
+
+2. **Backend: Scanner e Suporte a Extensões Multimídia (`src/scanner.rs`)**:
+   - Ampliado `SUPPORTED_EXTENSIONS` para incluir extensões de áudio (`m4b`, `mp3`, `m4a`, `ogg`, `opus`, `flac`) e vídeo (`mp4`, `webm`, `mkv`, `m4v`).
+   - Criada função `media_type_for_format(format: &str) -> &'static str` para classificar formatos em `book`, `audiobook` e `video`.
+
+3. **Backend: Modelos e Validação (`src/models.rs`, `tests/rust/location-validation.rs`)**:
+   - Adicionado campo `media_type: String` em `BookSummary` e `Book`.
+   - Adicionado `media_type: Option<String>` em `CatalogQuery`.
+   - Adicionada estrutura `MediaCounts { books, audiobooks, videos }` em `CatalogFacets`.
+   - Ampliada `validate_location` para validar posições com `time` e `duration` não-negativos e finitos para reprodução multimídia.
+
+4. **Backend: Streaming Inline e Banco de Dados (`src/api.rs`, `src/db.rs`, `tests/rust/catalog-regression.rs`)**:
+   - `stream_file`: ampliada a lista de MIME types em `inline_safe` para permitir reprodução nativa de áudio (`audio/*`) e vídeo (`video/*`) no navegador com `Content-Disposition: inline` e Range 206.
+   - `catalog_page`: adicionado filtro por `media_type` em SQL com amarração de parâmetros e preservação de paginação e desempate estável.
+   - `catalog_facets`: cálculo agregado de `media_counts` para alimentar os contadores das abas.
+   - Teste de regressão adicionado: `media_types_filter_and_count_correctly`.
+
+5. **Interface Web: Abas, Badges e Reprodutores (`web/index.html`, `web/styles.css`, `web/app.js`)**:
+   - `web/index.html`: adicionado componente `<nav class="media-tabs">` com abas para Livros (`#tab-books`), Audiolivros (`#tab-audiobooks`) e Cursos em Vídeo (`#tab-videos`), além de badges para contagens (`#badge-books`, `#badge-audiobooks`, `#badge-videos`). Input de upload atualizado com novos formatos.
+   - `web/styles.css`: estilização das abas responsivas (`.media-tabs`, `.media-tab-btn`, `.tab-badge`) e layouts de reprodução de áudio (`.audio-player-view`) e vídeo (`.video-player-view`).
+   - `web/app.js`:
+     - Gerenciamento de abas ativas e filtro no catálogo (`state.filters.media_type`).
+     - Atualização dinâmica dos contadores das abas via facetas.
+     - Reprodutores `<audio>` e `<video>` dedicados com controle de velocidade (0.75x a 2x), botões de pular/retroceder tempo (10s/15s/30s), persistência contínua de progresso (`time`, `duration`, `percent`) e pausa automática ao fechar o leitor.
+     - Navegação de anotações com suporte a timecodes (`jumpToLocation`).
 
 ### Verificações realmente executadas:
 - `CARGO_TARGET_DIR=target_local cargo clippy --locked --all-targets -- -D warnings`: 0 warnings.
-- `CARGO_TARGET_DIR=target_local cargo test --locked`: 43 passaram, 0 falharam.
-- `npm run test:ui`: aprovado.
+- `CARGO_TARGET_DIR=target_local cargo test --locked`: 44 passaram, 0 falharam.
+- `npm run test:ui`: aprovado (contrato visual, IDs únicos e gravação de progresso).
+- `npm run test:api`: aprovado (todas as rotas E2E).
+- `npm run test:auth`: aprovado (saúde pública e proteção HTTP Basic).
 
 ### Próximo passo:
-- Fazer git push do plano documentado e implementar a Etapa 1 (extensões de scanner, streaming inline de mídia, filtro `media_type` e abas na interface web).
+- Submeter as alterações da Etapa 1 ao repositório remoto (`git push`) e, na sequência, avançar para a Etapa 2 (Player de Audiolivro com MediaSession API e extração de tags ID3/MP4).
 
 ---
 
