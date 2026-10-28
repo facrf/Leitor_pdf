@@ -334,4 +334,16 @@ assert.equal(sampleDeletion.status, 400);
 assert.match((await sampleDeletion.json()).error, /comparacao integral/);
 assert.equal((await request(`/books/${sampleBooks[0].id}`)).book.is_available, true);
 
+// Verificacao de saude enriquecida com contadores de midia e rotas de cursos/legendas
+const healthWithMedia = (await request('/maintenance/health')).health;
+assert.ok(healthWithMedia.media_counts, 'media_counts presente na saude da biblioteca');
+assert.equal(typeof healthWithMedia.media_counts.books, 'number');
+assert.equal(typeof healthWithMedia.media_counts.audiobooks, 'number');
+assert.equal(typeof healthWithMedia.media_counts.videos, 'number');
+
+const courseCheck = await request(`/books/${sampleBooks[0].id}/course`);
+assert.equal(courseCheck.course, null);
+const subsCheck = await request(`/books/${sampleBooks[0].id}/subtitles`);
+assert.deepEqual(subsCheck.subtitles, []);
+
 console.log('API E2E aprovada: seguranca, falhas, scan incremental, busca, colecoes, duplicatas, saude, OPDS, backup/restauracao e capas.');

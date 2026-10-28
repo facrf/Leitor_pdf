@@ -68,6 +68,12 @@ pub fn router(state: AppState) -> Router {
         .route("/books/{id}", get(get_book).patch(update_book))
         .route("/books/{id}/file", get(book_file).delete(delete_book_file))
         .route("/books/{id}/cover", get(book_cover))
+        .route("/books/{id}/course", get(book_course))
+        .route("/books/{id}/subtitles", get(book_subtitles))
+        .route(
+            "/books/{id}/subtitles/{filename}",
+            get(book_subtitle_file),
+        )
         .route(
             "/books/{id}/progress",
             put(save_progress).delete(remove_progress),
@@ -1077,6 +1083,38 @@ async fn book_cover(
     let filename = state.db.cover_filename(id).await?;
     let path = confined_asset_path(&state.config.covers_dir, &filename).await?;
     stream_file(path, "cover", false, &HeaderMap::new()).await
+}
+
+async fn book_course(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<i64>,
+) -> AppResult<Json<Value>> {
+    let course = state.db.course_info(id).await?;
+    Ok(Json(json!({ "course": course })))
+}
+
+async fn book_subtitles(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<i64>,
+) -> AppResult<Json<Value>> {
+    let book = state.db.book(id).await?;
+    let root = library_root(&state).await?;
+    let tracks = crate::subtitles::detect_subtitles(&root, &book.relative_path)?;
+    Ok(Json(json!({ "subtitles": tracks })))
+}
+
+async fn book_subtitle_file(
+    State(state): State<AppState>,
+    AxumPath((id, filename)): AxumPath<(i64, String)>,
+) -> AppResult<Response> {
+    let book = state.db.book(id).await?;
+    let root = library_root(&state).await?;
+    let vtt_content = crate::subtitles::load_subtitle_vtt(&root, &book.relative_path, &filename)?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/vtt; charset=utf-8")
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(Body::from(vtt_content))
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// Resolve um nome simples e rejeita links que apontem para fora das capas.

@@ -133,6 +133,9 @@ Ao salvar progresso, `location` deve ser um objeto JSON de até 8 KiB serializad
 | `GET /books/{id}/comic/resource/{caminho}` | Imagem interna de CBZ. |
 | `GET /books/{id}/text` | Leitor para texto/HTML/FB2. |
 | `GET /books/{id}/mobi` | Leitor para MOBI/AZW sem DRM. |
+| `GET /books/{id}/course` | Informações do curso e lista de aulas na mesma pasta (progresso consolidado e conclusão). |
+| `GET /books/{id}/subtitles` | Lista de faixas de legendas locais (.vtt e .srt) detectadas para o vídeo. |
+| `GET /books/{id}/subtitles/{filename}` | Serve o arquivo de legenda como WebVTT sob demanda (conversão automática de SRT). |
 
 Exemplo de progresso por página:
 

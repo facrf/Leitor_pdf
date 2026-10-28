@@ -7,7 +7,7 @@ RUN cargo test --release --locked && cargo build --release --locked
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates poppler-utils tesseract-ocr tesseract-ocr-por tesseract-ocr-eng \
+    && apt-get install -y --no-install-recommends ca-certificates poppler-utils ffmpeg tesseract-ocr tesseract-ocr-por tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 estante \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin estante

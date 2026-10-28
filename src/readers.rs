@@ -433,7 +433,7 @@ fn be_u32(data: &[u8], offset: usize) -> AppResult<u32> {
     Ok(u32::from_be_bytes(bytes))
 }
 
-fn natural_key(value: &str) -> Vec<String> {
+pub(crate) fn natural_key(value: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut digits = None;

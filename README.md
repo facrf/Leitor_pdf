@@ -1,10 +1,14 @@
 # Estante Livre
 
-Biblioteca digital privada e offline-first para PDF, EPUB, MOBI/AZW, CBZ e livros em texto. O backend Rust entrega a API e a interface web responsiva em um único container, com indexação incremental, busca avançada, coleções, diagnóstico, backup, OPDS e autenticação opcional.
+Biblioteca digital privada e offline-first para livros (PDF, EPUB, MOBI/AZW, CBZ, TXT), audiolivros (M4B, MP3, M4A, OGG, OPUS, FLAC) e cursos em vídeo (MP4, WEBM, MKV, M4V) organizados em abas independentes. O backend Rust entrega a API e a interface web responsiva em um único container, com streaming nativo via Range Requests (HTTP 206), indexação incremental, busca avançada, coleções, diagnóstico, backup, OPDS e autenticação opcional.
 
 ## Recursos
 
-- Cataloga recursivamente `pdf`, `epub`, `mobi`, `azw`, `azw3`, `cbz`, `txt`, `md`, `html`, `htm` e `fb2`.
+- Navegação organizada por abas dedicadas: 📚 **Livros**, 🎧 **Audiolivros** e 🎬 **Cursos em Vídeo**, com contadores dinâmicos no catálogo.
+- Player de audiolivros completo com extração de metadados e capas embutidas (ID3v2, ID3v1, MP4 atoms), integração profunda com `MediaSession` (controles na tela de bloqueio/sistema operacional), temporizador de sono (*sleep timer*) com contagem regressiva e atalhos de seek.
+- Player em **Modo Teatro** para cursos em vídeo com painel retrátil de aulas da mesma pasta, ordenação natural de capítulos, checklist de aulas concluídas e progresso consolidado, agrupamento em coleção com um clique, suporte a legendas locais (`.vtt` e `.srt` convertidos sob demanda), atalhos de teclado (Espaço para play/pause, F para tela cheia, M para mudo, setas para avançar/voltar 10s).
+- Cataloga recursivamente `pdf`, `epub`, `mobi`, `azw`, `azw3`, `cbz`, `txt`, `md`, `html`, `htm`, `fb2`, `m4b`, `mp3`, `m4a`, `ogg`, `opus`, `flac`, `mp4`, `webm`, `mkv` e `m4v`.
+- Extração automática de thumbnails para vídeos via `ffmpeg` em baixa prioridade e capas para audiolivros.
 - Lê PDF pelo visualizador nativo do navegador; EPUB por capítulos; CBZ por páginas; MOBI/AZW clássico e texto em um leitor isolado.
 - Salva página/capítulo/percentual de leitura, destaques com marca-texto colorido (amarelo, verde, azul) e anotações no SQLite; exporta anotações e citações em Markdown e JSON, com busca e filtros rápidos no caderno.
 - As mudanças pelos controles do leitor são salvas após 700 ms e ao fechar o leitor. A posição é gravada primeiro em IndexedDB e reenviada ao abrir a aplicação, reconectar, voltar à aba e a cada 15 segundos. Ao ocultar/sair da aba, há uma tentativa adicional com `keepalive`; encerramento antes de concluir a gravação local ainda pode perder a última mudança. PDF usa a página informada nos controles da aplicação (não acompanha o visualizador nativo); texto/MOBI usa o percentual manual.

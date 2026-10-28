@@ -142,6 +142,30 @@ pub struct LibraryHealth {
     pub without_language: usize,
     pub duplicate_groups: usize,
     pub scan_issues: Vec<HealthIssue>,
+    #[serde(default)]
+    pub media_counts: Option<MediaCounts>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CourseLesson {
+    pub id: i64,
+    pub title: String,
+    pub filename: String,
+    pub relative_path: String,
+    pub format: String,
+    pub percent: f64,
+    pub completed: bool,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CourseInfo {
+    pub course_name: String,
+    pub parent_dir: String,
+    pub lessons: Vec<CourseLesson>,
+    pub total_lessons: usize,
+    pub completed_lessons: usize,
+    pub course_percent: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -916,6 +916,22 @@ impl Database {
                     message: row.get(1)?,
                 })
             })?;
+            let (books_count, audiobooks_count, videos_count): (usize, usize, usize) = conn
+                .query_row(
+                    "SELECT
+                        COALESCE(SUM(CASE WHEN format NOT IN ('m4b', 'mp3', 'm4a', 'ogg', 'opus', 'flac', 'mp4', 'webm', 'mkv', 'm4v') THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN format IN ('m4b', 'mp3', 'm4a', 'ogg', 'opus', 'flac') THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN format IN ('mp4', 'webm', 'mkv', 'm4v') THEN 1 ELSE 0 END), 0)
+                     FROM books WHERE is_available=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap_or((0, 0, 0));
+            let media_counts = Some(crate::models::MediaCounts {
+                books: books_count,
+                audiobooks: audiobooks_count,
+                videos: videos_count,
+            });
             Ok(LibraryHealth {
                 total: counts.0,
                 available: counts.1,
@@ -926,6 +942,7 @@ impl Database {
                 without_language: counts.6,
                 duplicate_groups,
                 scan_issues: rows.collect::<Result<Vec<_>, _>>()?,
+                media_counts,
             })
         }).await
     }
@@ -949,7 +966,7 @@ impl Database {
         self.run(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, relative_path FROM books
-                 WHERE is_available=1 AND format IN ('pdf', 'mp3', 'm4a', 'm4b') AND cover_filename IS NULL
+                 WHERE is_available=1 AND format IN ('pdf', 'mp3', 'm4a', 'm4b', 'mp4', 'webm', 'mkv', 'm4v') AND cover_filename IS NULL
                  ORDER BY id LIMIT ?1",
             )?;
             let rows = stmt.query_map([limit.clamp(1, 10_000) as i64], |row| {
@@ -1001,6 +1018,114 @@ impl Database {
             )
             .optional()?
             .ok_or(AppError::NotFound)
+        })
+        .await
+    }
+
+    pub async fn course_info(&self, book_id: i64) -> AppResult<Option<crate::models::CourseInfo>> {
+        self.run(move |conn| {
+            let (rel_path, format): (String, String) = conn
+                .query_row(
+                    "SELECT relative_path, format FROM books WHERE id = ?1",
+                    [book_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+                .ok_or(AppError::NotFound)?;
+
+            let is_media = matches!(
+                format.as_str(),
+                "mp4" | "webm" | "mkv" | "m4v" | "m4b" | "mp3" | "m4a" | "ogg" | "opus" | "flac"
+            );
+            if !is_media {
+                return Ok(None);
+            }
+
+            let path = std::path::Path::new(&rel_path);
+            let parent = match path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p,
+                _ => return Ok(None),
+            };
+
+            let parent_str = parent.to_string_lossy().to_string();
+            let course_name = parent
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&parent_str)
+                .to_string();
+
+            let pattern = format!("{parent_str}/%");
+            let mut stmt = conn.prepare(
+                "SELECT b.id, b.title, b.filename, b.relative_path, b.format,
+                        COALESCE(rp.percent, 0.0)
+                 FROM books b
+                 LEFT JOIN reading_progress rp ON rp.book_id = b.id
+                 WHERE b.is_available = 1
+                   AND b.relative_path LIKE ?1
+                 ORDER BY b.relative_path ASC",
+            )?;
+
+            let rows = stmt.query_map([pattern], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, f64>(5)?,
+                ))
+            })?;
+
+            let mut lessons = Vec::new();
+            for item in rows {
+                let (id, title, filename, row_rel_path, fmt, percent) = item?;
+                let row_path = std::path::Path::new(&row_rel_path);
+                if row_path.parent() != Some(parent) {
+                    continue;
+                }
+                let is_media_fmt = matches!(
+                    fmt.as_str(),
+                    "mp4" | "webm" | "mkv" | "m4v" | "m4b" | "mp3" | "m4a" | "ogg" | "opus" | "flac"
+                );
+                if !is_media_fmt {
+                    continue;
+                }
+                let completed = percent >= 90.0;
+                let is_current = id == book_id;
+                lessons.push(crate::models::CourseLesson {
+                    id,
+                    title,
+                    filename,
+                    relative_path: row_rel_path,
+                    format: fmt,
+                    percent,
+                    completed,
+                    is_current,
+                });
+            }
+
+            lessons.sort_by_key(|a| crate::readers::natural_key(&a.filename));
+
+            if lessons.len() <= 1 {
+                return Ok(None);
+            }
+
+            let total_lessons = lessons.len();
+            let completed_lessons = lessons.iter().filter(|l| l.completed).count();
+            let course_percent = if total_lessons > 0 {
+                (completed_lessons as f64 / total_lessons as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            Ok(Some(crate::models::CourseInfo {
+                course_name,
+                parent_dir: parent_str,
+                lessons,
+                total_lessons,
+                completed_lessons,
+                course_percent,
+            }))
         })
         .await
     }

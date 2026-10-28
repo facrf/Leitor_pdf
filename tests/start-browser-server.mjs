@@ -9,6 +9,7 @@ const server = spawn('cargo', ['run', '--locked'], {
   stdio: 'inherit',
   env: {
     ...process.env,
+    CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || 'target_local',
     APP_BIND: '127.0.0.1:20004',
     LIBRARY_ROOT: `${runtimeDirectory}/library`,
     DATABASE_PATH: `${runtimeDirectory}/library.db`,

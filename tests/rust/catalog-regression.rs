@@ -289,3 +289,36 @@ async fn media_types_filter_and_count_correctly() {
     assert_eq!(videos.books[0].format, "mp4");
     assert_eq!(videos.books[0].media_type, "video");
 }
+
+#[tokio::test]
+async fn course_info_groups_lessons_and_calculates_progress() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA).unwrap();
+    migrate(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO books(id,title,filename,relative_path,format,size,modified_at,created_at,updated_at) VALUES
+            (10,'Aula 01','01_intro.mp4','Cursos/Rust/01_intro.mp4','mp4',100,1,'now','now'),
+            (11,'Aula 02','02_tipos.mp4','Cursos/Rust/02_tipos.mp4','mp4',120,1,'now','now'),
+            (12,'Aula 10','10_macros.mp4','Cursos/Rust/10_macros.mp4','mp4',150,1,'now','now');
+         INSERT INTO reading_progress(book_id,location,percent,updated_at) VALUES
+            (10,'{\"type\":\"video\",\"time\":100.0,\"duration\":100.0}',100.0,'now');",
+    ).unwrap();
+    let db = Database::from_connection(conn).unwrap();
+
+    let course = db.course_info(11).await.unwrap().expect("curso esperado");
+    assert_eq!(course.course_name, "Rust");
+    assert_eq!(course.parent_dir, "Cursos/Rust");
+    assert_eq!(course.total_lessons, 3);
+    assert_eq!(course.completed_lessons, 1);
+    assert!((course.course_percent - 33.33).abs() < 1.0);
+    // Ordenacao natural: 01, 02, 10
+    assert_eq!(course.lessons[0].filename, "01_intro.mp4");
+    assert!(course.lessons[0].completed);
+    assert!(!course.lessons[0].is_current);
+
+    assert_eq!(course.lessons[1].filename, "02_tipos.mp4");
+    assert!(course.lessons[1].is_current);
+    assert!(!course.lessons[1].completed);
+
+    assert_eq!(course.lessons[2].filename, "10_macros.mp4");
+}

@@ -14,6 +14,7 @@ mod opds;
 mod pending_file;
 mod readers;
 mod scanner;
+mod subtitles;
 
 use std::{
     sync::{Arc, Mutex},

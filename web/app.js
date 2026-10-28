@@ -390,7 +390,7 @@ async function renderReader() {
     } else if (['m4b','mp3','m4a','ogg','opus','flac'].includes(book.format)) {
       renderAudioPlayer();
     } else if (['mp4','webm','mkv','m4v'].includes(book.format)) {
-      renderVideoPlayer();
+      await renderVideoPlayer();
     } else throw new Error(`Leitura de ${book.format} ainda não disponível.`);
   } catch (error) { stage.innerHTML = `<div class="reader-error"><h2>Não foi possível abrir este livro</h2><p>${escapeHtml(error.message)}</p><a class="button light" href="/api/books/${book.id}/file?download=true">Baixar arquivo</a></div>`; }
 }
@@ -469,15 +469,73 @@ function renderAudioPlayer() {
   updateReaderLabel();
 }
 
-function renderVideoPlayer() {
+async function renderVideoPlayer() {
   const book = state.currentBook, stage = $('#reader-stage'), nav = $('#reader-navigation');
   const savedTime = Number(state.reader.location.time || 0);
-  stage.innerHTML = `
-    <div class="media-player-container video-player-view">
-      <video id="media-video-element" controls preload="metadata" playsinline src="/api/books/${book.id}/file">
-        Seu navegador não suporta a reprodução deste vídeo.
-      </video>
-    </div>`;
+
+  const [courseRes, subtitlesRes] = await Promise.all([
+    api(`/books/${book.id}/course`).catch(() => ({ course: null })),
+    api(`/books/${book.id}/subtitles`).catch(() => ({ subtitles: [] })),
+  ]);
+  const course = courseRes?.course;
+  const subtitles = subtitlesRes?.subtitles || [];
+
+  const trackElements = subtitles.map(sub => `
+    <track kind="subtitles"
+           label="${escapeHtml(sub.label)}"
+           srclang="${escapeHtml(sub.srclang)}"
+           src="/api/books/${book.id}/subtitles/${encodeURIComponent(sub.filename)}"
+           ${sub.is_default ? 'default' : ''}>
+  `).join('');
+
+  if (course) {
+    stage.innerHTML = `
+      <div class="video-theater-layout">
+        <div class="video-stage-main">
+          <video id="media-video-element" controls preload="metadata" playsinline src="/api/books/${book.id}/file">
+            ${trackElements}
+            Seu navegador não suporta a reprodução deste vídeo.
+          </video>
+        </div>
+        <aside class="course-sidebar" id="course-sidebar">
+          <header class="course-sidebar-header">
+            <h3 class="course-title" title="${escapeHtml(course.course_name)}">${escapeHtml(course.course_name)}</h3>
+            <div class="course-meta">
+              <span>${course.completed_lessons} de ${course.total_lessons} aulas</span>
+              <strong>${Math.round(course.course_percent)}%</strong>
+            </div>
+            <div class="course-progress-bar">
+              <div class="course-progress-fill" style="width: ${Math.round(course.course_percent)}%"></div>
+            </div>
+            <button type="button" class="course-create-collection-btn" id="course-create-collection">
+              ＋ Criar Coleção deste Curso
+            </button>
+          </header>
+          <ul class="course-lessons-list" id="course-lessons-list">
+            ${course.lessons.map(lesson => `
+              <li class="course-lesson-item ${lesson.is_current ? 'active' : ''}" data-lesson-id="${lesson.id}">
+                <button type="button" class="lesson-check-btn ${lesson.completed ? 'completed' : ''}" data-toggle-complete="${lesson.id}" title="${lesson.completed ? 'Concluída' : 'Marcar como concluída'}">
+                  ${lesson.completed ? '✓' : '○'}
+                </button>
+                <div class="lesson-details">
+                  <span class="lesson-title" title="${escapeHtml(lesson.title)}">${escapeHtml(lesson.title)}</span>
+                  <span class="lesson-meta">${Math.round(lesson.percent)}% · ${escapeHtml(lesson.format.toUpperCase())}</span>
+                </div>
+              </li>
+            `).join('')}
+          </ul>
+        </aside>
+      </div>`;
+  } else {
+    stage.innerHTML = `
+      <div class="media-player-container video-player-view">
+        <video id="media-video-element" controls preload="metadata" playsinline src="/api/books/${book.id}/file">
+          ${trackElements}
+          Seu navegador não suporta a reprodução deste vídeo.
+        </video>
+      </div>`;
+  }
+
   nav.innerHTML = `
     <button class="icon-button light" id="video-step-back" type="button" title="Voltar 10s">↺ 10s</button>
     <label>Velocidade:
@@ -490,7 +548,10 @@ function renderVideoPlayer() {
       </select>
     </label>
     <button class="icon-button light" id="video-step-fwd" type="button" title="Avançar 10s">↻ 10s</button>
+    ${course ? `<button class="button ghost small light" id="video-toggle-sidebar" type="button" title="Alternar painel de aulas">◨ Aulas (${course.completed_lessons}/${course.total_lessons})</button>` : ''}
+    <button class="icon-button light" id="video-fullscreen-btn" type="button" title="Tela Cheia (F)">⛶</button>
   `;
+
   const video = $('#media-video-element');
   if (video) {
     if (savedTime > 0) {
@@ -499,10 +560,29 @@ function renderVideoPlayer() {
         updateMediaProgress(video, 'video');
       };
     }
-    video.ontimeupdate = () => updateMediaProgress(video, 'video');
+    video.ontimeupdate = () => {
+      updateMediaProgress(video, 'video');
+      if (video.duration && (video.currentTime / video.duration) >= 0.95 && state.reader.percent < 95) {
+        state.reader.percent = 100;
+        scheduleProgressSave(true);
+      }
+    };
+    video.onended = () => {
+      state.reader.percent = 100;
+      scheduleProgressSave(true);
+      toast('Aula concluída!');
+      if (course) {
+        const item = $(`[data-lesson-id="${book.id}"] .lesson-check-btn`);
+        if (item) {
+          item.classList.add('completed');
+          item.textContent = '✓';
+        }
+      }
+    };
     video.onpause = () => scheduleProgressSave(true);
     setupMediaSession(video, book, 'video');
   }
+
   $('#video-speed-select')?.addEventListener('change', e => {
     if (video) video.playbackRate = Number(e.target.value);
   });
@@ -512,7 +592,100 @@ function renderVideoPlayer() {
   $('#video-step-fwd')?.addEventListener('click', () => {
     if (video) video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
   });
+  $('#video-toggle-sidebar')?.addEventListener('click', () => {
+    $('#course-sidebar')?.classList.toggle('collapsed');
+  });
+  $('#video-fullscreen-btn')?.addEventListener('click', () => {
+    toggleFullscreen($('#reader-stage'));
+  });
+
+  if (course) {
+    $$('.course-lesson-item').forEach(item => {
+      item.addEventListener('click', e => {
+        if (e.target.closest('[data-toggle-complete]')) return;
+        switchToLesson(Number(item.dataset.lessonId));
+      });
+    });
+
+    $$('[data-toggle-complete]').forEach(btn => {
+      btn.addEventListener('click', async e => {
+        e.stopPropagation();
+        const lessonId = Number(btn.dataset.toggleComplete);
+        const isComp = btn.classList.contains('completed');
+        const newPercent = isComp ? 0 : 100;
+        try {
+          await api(`/books/${lessonId}/progress`, {
+            method: 'PUT',
+            body: JSON.stringify({
+              percent: newPercent,
+              location: { type: 'video', time: 0, duration: 0 },
+            }),
+          });
+          btn.classList.toggle('completed', !isComp);
+          btn.textContent = !isComp ? '✓' : '○';
+          toast(!isComp ? 'Aula marcada como concluída.' : 'Aula desmarcada.');
+        } catch (err) {
+          toast(err.message, true);
+        }
+      });
+    });
+
+    $('#course-create-collection')?.addEventListener('click', async () => {
+      try {
+        const existing = (state.collections || []).find(c => c.name.toLowerCase() === course.course_name.toLowerCase());
+        let colId = existing?.id;
+        if (!colId) {
+          const created = await api('/collections', {
+            method: 'POST',
+            body: JSON.stringify({ name: course.course_name, color: '#10b981' }),
+          });
+          colId = created.id;
+        }
+        for (const lesson of course.lessons) {
+          await api(`/collections/${colId}/books/${lesson.id}`, { method: 'PUT' });
+        }
+        toast(`Coleção "${course.course_name}" criada com ${course.lessons.length} aulas!`);
+        await loadSettings();
+      } catch (err) {
+        toast(`Erro ao criar coleção: ${err.message}`, true);
+      }
+    });
+  }
+
   updateReaderLabel();
+}
+
+async function switchToLesson(lessonId) {
+  if (state.currentBook?.id === lessonId) return;
+  await persistProgress();
+  try {
+    const data = await api(`/books/${lessonId}`);
+    if (data?.book) {
+      state.currentBook = data.book;
+      let progress = data.book.progress;
+      try {
+        const pending = (await pendingProgress()).find(item => item.bookId === data.book.id);
+        if (pending) progress = JSON.parse(pending.body);
+      } catch (_) {}
+      state.reader = { kind: data.book.format, location: progress?.location || {}, percent: progress?.percent || 0, items: [] };
+      $('#reader-title').textContent = data.book.title;
+      $('#reader-download').href = `/api/books/${data.book.id}/file?download=true`;
+      await renderVideoPlayer();
+      const video = $('#media-video-element');
+      if (video) video.play().catch(() => {});
+      loadNotes();
+    }
+  } catch (error) {
+    toast(`Não foi possível alternar a aula: ${error.message}`, true);
+  }
+}
+
+function toggleFullscreen(element) {
+  if (!document.fullscreenElement) {
+    (element || document.documentElement).requestFullscreen?.().catch(() => {});
+  } else {
+    document.exitFullscreen?.().catch(() => {});
+  }
 }
 
 function setupMediaSession(media, book, type) {
@@ -993,13 +1166,20 @@ function renderHealth(health) {
   const cards = [
     ['Livros no catálogo', health.total, 'total'],
     ['Disponíveis', health.available, 'good'],
+  ];
+  if (health.media_counts) {
+    cards.push(['E-books e documentos', health.media_counts.books, 'good']);
+    cards.push(['Audiolivros', health.media_counts.audiobooks, 'good']);
+    cards.push(['Vídeos e cursos', health.media_counts.videos, 'good']);
+  }
+  cards.push(
     ['Arquivos ausentes', health.unavailable, health.unavailable ? 'warn' : 'good'],
     ['Sem autor', health.without_author, health.without_author ? 'warn' : 'good'],
     ['Sem assunto', health.without_subject, health.without_subject ? 'warn' : 'good'],
     ['Sem capa', health.without_cover, health.without_cover ? 'warn' : 'good'],
     ['Sem idioma', health.without_language, health.without_language ? 'warn' : 'good'],
     ['Grupos duplicados', health.duplicate_groups, health.duplicate_groups ? 'warn' : 'good'],
-  ];
+  );
   const issues = health.scan_issues || [];
   $('#health-grid').innerHTML = cards.map(([label, value, tone]) => `<article class="health-card ${tone}"><strong>${value}</strong><span>${label}</span></article>`).join('')
     + (issues.length ? `<details class="scan-issues"><summary>${issues.length} aviso(s) da última varredura</summary>${issues.map(issue => `<p><strong>${escapeHtml(issue.path)}</strong><small>${escapeHtml(issue.message)}</small></p>`).join('')}</details>` : '');
@@ -1271,6 +1451,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         else if (state.reader.kind === 'pdf') changePdfPage(1);
         else if (state.reader.kind === 'epub') renderPagedResource('epub', Number(state.reader.location.chapter || 0) + 1);
         else if (state.reader.kind === 'cbz') renderPagedResource('comic', Number(state.reader.location.page_index || 0) + 1);
+      } else if (event.key === 'f' || event.key === 'F') {
+        if (video) {
+          event.preventDefault();
+          toggleFullscreen($('#reader-stage'));
+        }
+      } else if (event.key === 'm' || event.key === 'M') {
+        const media = audio || video;
+        if (media) {
+          event.preventDefault();
+          media.muted = !media.muted;
+        }
       }
     }
   });

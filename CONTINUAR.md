@@ -1,6 +1,59 @@
 # Checkpoint — 2026-10-28
 
-## Revisão atual — Conclusão da Etapa 2 (Metadados de Áudio, Capas Embutidas, Temporizador de Sono e MediaSession)
+## Revisão atual — Conclusão das Etapas 3 e 4 (Player de Cursos em Vídeo, Aulas por Pasta, Thumbnails via FFmpeg e Legendas)
+
+Implementação e verificação completa das **Etapas 3 e 4** do plano de adoção (`docs/PLANO_AUDIOLIVROS_E_VIDEOS.md`):
+- **Etapa 3**: Player com layout "Modo Curso / Teatro", detecção e agrupamento inteligente de aulas e módulos pelo diretório pai (`course_info`), ordenação natural dos arquivos (`natural_key`), painel retrátil de aulas com checklist visual de conclusão (`percent >= 90.0`), progresso consolidado do curso, criação e amarração de coleção em lote com 1 clique, alternância suave entre aulas e atalhos ergonômicos de teclado (F para tela cheia, M para mudo, Espaço para play/pause, setas para busca).
+- **Etapa 4**: Extração de thumbnails para vídeos (`mp4`, `webm`, `mkv`, `m4v`) via `ffmpeg` em baixa prioridade (`nice -n 15`) com escalonamento proporcional e fallback para o primeiro quadro (`00:00:00`), suporte completo a legendas locais em `.vtt` e `.srt` (com conversão on-the-fly para WebVTT e detecção de idiomas pt, en, es, fr, de), integração no `<video>` nativo do navegador via tags `<track>`, atualização do `Dockerfile` incluindo `ffmpeg`, e expansão do painel de diagnóstico de saúde (`/maintenance/health`) com cartões detalhados por tipo de mídia (`E-books e documentos`, `Audiolivros`, `Vídeos e cursos`).
+
+### Mudanças realizadas:
+
+1. **Backend: Agrupamento de Aulas de Cursos e Metadados (`src/models.rs`, `src/db.rs`, `src/readers.rs`, `tests/rust/catalog-regression.rs`)**:
+   - `src/models.rs`: Adicionadas estruturas `CourseLesson` e `CourseInfo`. `LibraryHealth` enriquecida com `media_counts: Option<MediaCounts>`.
+   - `src/readers.rs`: Função de ordenação alfanumérica natural `natural_key` exposta como `pub(crate)` para reutilização no banco e nas legendas.
+   - `src/db.rs`:
+     - Implementado método `course_info(book_id)`: identifica a pasta pai, busca todas as aulas do mesmo módulo, aplica ordenação natural (`01`, `02`, `10`), calcula percentual consolidado e status de conclusão (`completed`).
+     - Atualizada query `missing_pdf_covers` para incluir formatos de vídeo (`mp4`, `webm`, `mkv`, `m4v`).
+     - Atualizado `library_health` para calcular contadores de livros, audiolivros e vídeos.
+   - `tests/rust/catalog-regression.rs`: Adicionado teste de regressão `course_info_groups_lessons_and_calculates_progress`.
+
+2. **Backend: Thumbnails de Vídeo via FFmpeg (`src/covers.rs`, `Dockerfile`)**:
+   - `src/covers.rs`: Implementada extração de thumbnails com `nice -n 15 ffmpeg -ss 00:00:01 -i <source> -frames:v 1 -update 1 -vf scale=min(900\,iw):-1 -q:v 2` com fallback para `-ss 00:00:00` e limpeza via `PendingFile`.
+   - `Dockerfile`: Adicionado pacote `ffmpeg` às dependências da imagem de produção Debian Bookworm.
+
+3. **Backend: Detecção e Conversão de Legendas (`src/subtitles.rs`, `src/api.rs`, `src/main.rs`, `tests/rust/subtitles.rs`)**:
+   - Criado módulo `src/subtitles.rs` com `detect_subtitles` (varre arquivos `.vtt` e `.srt` do mesmo vídeo), `load_subtitle_vtt` (leitura limitada a 5 MB e proteção contra path traversal) e `srt_to_vtt` (conversão sob demanda de timestamps e índices SubRip para WebVTT).
+   - `src/api.rs`: Rotas `GET /api/books/{id}/course`, `GET /api/books/{id}/subtitles` e `GET /api/books/{id}/subtitles/{filename}`.
+   - Teste unitário completo em `tests/rust/subtitles.rs`.
+
+4. **Interface Web: Modo Curso / Teatro e Diagnóstico (`web/app.js`, `web/styles.css`)**:
+   - `web/styles.css`: Estilização do palco de teatro (`.video-theater-layout`, `.video-stage-main`), estilos de legendas (`::cue`), sidebar retrátil de aulas (`.course-sidebar`), barra de progresso do curso (`.course-progress-bar`), botão de coleção (`.course-create-collection-btn`) e itens de aula interativos com checklist (`.lesson-check-btn`).
+   - `web/app.js`:
+     - `renderVideoPlayer`: Detecção automática de curso e legendas; injeção de `<track>` no elemento `<video>`; carregamento da barra lateral de módulos; alternância rápida de aula via `switchToLesson`; marcação interativa de conclusão (salvando 100% de progresso); conclusão automática ao atingir 95% ou fim do vídeo; botão para criar coleção do curso em lote com um clique.
+     - Atalhos de teclado: `F` (tela cheia), `M` (mutar áudio), `Espaço` (play/pause), `ArrowLeft`/`ArrowRight` (buscar 10s).
+     - `renderHealth`: Exibição de contadores específicos de e-books, audiolivros e vídeos nos cartões de saúde da biblioteca.
+
+5. **Testes e Documentação (`tests/api-e2e.mjs`, `tests/start-browser-server.mjs`, `README.md`, `docs/api.md`)**:
+   - `tests/api-e2e.mjs`: Testes E2E para `/books/{id}/course`, `/books/{id}/subtitles` e `health.media_counts`.
+   - `tests/start-browser-server.mjs`: Propagação do `CARGO_TARGET_DIR=target_local`.
+   - `README.md` e `docs/api.md`: Documentação das 4 etapas e das novas rotas de curso e legenda.
+
+### Verificações realmente executadas:
+- `CARGO_TARGET_DIR=target_local cargo clippy --locked --all-targets -- -D warnings`: 0 warnings, 0 erros.
+- `CARGO_TARGET_DIR=target_local cargo test --locked`: 52 testes passaram (0 falhas, 1 teste de volume ignorado).
+- `npm run test:ui`: aprovado (contrato visual, IDs únicos e gravação de progresso).
+- `npm run test:api`: aprovado (todas as rotas E2E).
+- `npm run test:auth`: aprovado (saúde pública e proteção HTTP Basic).
+- `bash tests/with-local-tools.sh npm run test:browser`: aprovado (Playwright browser test completo).
+
+### Próximo passo:
+- Realizar commit e push das Etapas 3 e 4 no repositório remoto (`origin/main`).
+
+---
+
+# Checkpoint — 2026-10-28
+
+## Revisão anterior — Conclusão da Etapa 2 (Metadados de Áudio, Capas Embutidas, Temporizador de Sono e MediaSession)
 
 Implementação e verificação completa da **Etapa 2**: parser zero-dependency de metadados ID3v2, ID3v1 e MP4/M4B atoms com extração de capas embutidas (`APIC` e `covr`), integração automática na geração de capas e varredura de audiolivros, player aprimorado com Temporizador de Sono (Sleep Timer) com contagem regressiva, integração profunda com `navigator.mediaSession` (metadados, capa, controles da tela de bloqueio e atalhos de seek) e atalhos de teclado dedicados no reprodutor.
 
