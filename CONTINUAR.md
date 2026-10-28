@@ -44,6 +44,11 @@ Implementação e verificação completa das **Etapas 3 e 4** do plano de adoç�
      - Modal de detalhes (`#book-detail`): Habilitado o botão de ação para audiolivros e vídeos com rótulos contextuais (`▶ Ouvir audiolivro / Continuar audição`, `▶ Assistir aula / Continuar assistindo`) e indicador de categoria no topo (`🎧 AUDIOLIVRO`, `🎬 CURSO / VÍDEO`).
      - Cartões do catálogo e Mesa de Leitura: Rótulos de progresso contextualizados por tipo de mídia (`% ouvido`, `% assistido`, `% lido`).
 
+7. **Imagem Docker e GHCR (`Dockerfile`, `compose.yaml`)**:
+   - Construída e disponibilizada a imagem Docker localmente com a tag `ghcr.io/facrf/estante-livre:latest` (ID `a56311fa3627`).
+   - A imagem inclui `ffmpeg`, `poppler-utils`, `tesseract-ocr`, binário compilado em perfil `release` e passou por todos os 53 testes durante a etapa de build.
+   - Pronta para execução imediata via `docker compose up -d`.
+
 ### Verificações realmente executadas:
 - `CARGO_TARGET_DIR=target_local cargo clippy --locked --all-targets -- -D warnings`: 0 warnings, 0 erros.
 - `CARGO_TARGET_DIR=target_local cargo test --locked`: 52 testes passaram (0 falhas, 1 teste de volume ignorado).
