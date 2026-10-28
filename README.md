@@ -189,7 +189,7 @@ O servidor entrega tanto a API (`/api`) quanto a interface em `web/`. O SQLite �
 | `src/api.rs` | Rotas HTTP, streaming, uploads, progresso, notas e compartilhamentos. |
 | `web/` | Interface responsiva sem dependências ou chamadas a CDNs. |
 
-Consulte também a [documentação de arquitetura](docs/architecture.md), a [referência detalhada da API](docs/api.md) e o guia de [HTTPS com Caddy ou Traefik](docs/https.md).
+Consulte também a [documentação de arquitetura](docs/architecture.md), o [plano de adoção de audiolivros e cursos em vídeo](docs/PLANO_AUDIOLIVROS_E_VIDEOS.md), a [referência detalhada da API](docs/api.md) e o guia de [HTTPS com Caddy ou Traefik](docs/https.md).
 
 ## Uso da interface
 

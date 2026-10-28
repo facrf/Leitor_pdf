@@ -541,7 +541,17 @@ pub fn is_tesseract_available() -> bool {
         .unwrap_or(false)
 }
 
-pub fn extract_pdf_ocr_sample(path: &Path, max_bytes: usize, _timeout_secs: u64) -> Option<String> {
+fn is_timeout_available() -> bool {
+    std::process::Command::new("timeout")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn extract_pdf_ocr_sample(path: &Path, max_bytes: usize, timeout_secs: u64) -> Option<String> {
     if !is_tesseract_available() {
         return None;
     }
@@ -554,7 +564,19 @@ pub fn extract_pdf_ocr_sample(path: &Path, max_bytes: usize, _timeout_secs: u64)
     }
     let temp_prefix = temp_dir.join("page");
 
-    let pdftoppm_status = std::process::Command::new("pdftoppm")
+    let timeout_str = timeout_secs.to_string();
+    let has_timeout = is_timeout_available() && timeout_secs > 0;
+
+    let mut ppm_cmd = if has_timeout {
+        let mut cmd = std::process::Command::new("timeout");
+        cmd.arg(&timeout_str);
+        cmd.arg("pdftoppm");
+        cmd
+    } else {
+        std::process::Command::new("pdftoppm")
+    };
+
+    let pdftoppm_status = ppm_cmd
         .arg("-png")
         .arg("-r")
         .arg("150")
@@ -578,13 +600,25 @@ pub fn extract_pdf_ocr_sample(path: &Path, max_bytes: usize, _timeout_secs: u64)
                 .collect();
             pngs.sort();
             for png in pngs {
-                let mut cmd = std::process::Command::new("tesseract");
+                let mut cmd = if has_timeout {
+                    let mut c = std::process::Command::new("timeout");
+                    c.arg(&timeout_str);
+                    c.arg("tesseract");
+                    c
+                } else {
+                    std::process::Command::new("tesseract")
+                };
                 cmd.arg(&png).arg("stdout").arg("-l").arg("por+eng");
                 let ocr_output = cmd.output().or_else(|_| {
-                    std::process::Command::new("tesseract")
-                        .arg(&png)
-                        .arg("stdout")
-                        .output()
+                    let mut fallback = if has_timeout {
+                        let mut c = std::process::Command::new("timeout");
+                        c.arg(&timeout_str);
+                        c.arg("tesseract");
+                        c
+                    } else {
+                        std::process::Command::new("tesseract")
+                    };
+                    fallback.arg(&png).arg("stdout").output()
                 });
                 if let Ok(output) = ocr_output {
                     if output.status.success() {

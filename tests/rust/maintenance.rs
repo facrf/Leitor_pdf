@@ -57,3 +57,30 @@ fn cleanup_protects_referenced_recent_and_symlink_covers() {
     assert_eq!(items[0].filename, "old.png");
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn trash_restores_when_parent_subfolder_was_removed() {
+    let root = fixture();
+    let subfolder = root.join("sub").join("nested");
+    fs::create_dir_all(&subfolder).unwrap();
+    let file = subfolder.join("nested_book.txt");
+    fs::write(&file, b"nested content").unwrap();
+    let item = trash(
+        &root,
+        2,
+        "nested_book.txt".into(),
+        "sub/nested/nested_book.txt".into(),
+    )
+    .unwrap();
+    assert!(!file.exists());
+    // Remove the nested subfolder
+    fs::remove_dir_all(root.join("sub")).unwrap();
+    assert!(!root.join("sub").exists());
+    // Restore should succeed and recreate the parent directories
+    restore_trash(&root, &item.token).unwrap();
+    assert_eq!(
+        fs::read(root.join("sub/nested/nested_book.txt")).unwrap(),
+        b"nested content"
+    );
+    fs::remove_dir_all(root).unwrap();
+}

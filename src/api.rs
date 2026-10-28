@@ -945,17 +945,23 @@ async fn reindex_fts_content(
     let ocr_enabled = state.config.ocr_enabled;
     let ocr_timeout = state.config.ocr_timeout_seconds;
     for (id, relative_path, format, title, author, subjects) in pending {
-        let content = match scanner::resolve_book_path(&root, &relative_path) {
-            Ok(full_path) => crate::readers::extract_text_sample_with_options(
-                &full_path,
-                &format,
-                256 * 1024,
-                ocr_enabled,
-                ocr_timeout,
-            )
-            .unwrap_or_default(),
-            Err(_) => String::new(),
-        };
+        let root_clone = root.clone();
+        let content = tokio::task::spawn_blocking(move || {
+            match scanner::resolve_book_path(&root_clone, &relative_path) {
+                Ok(full_path) => crate::readers::extract_text_sample_with_options(
+                    &full_path,
+                    &format,
+                    256 * 1024,
+                    ocr_enabled,
+                    ocr_timeout,
+                )
+                .unwrap_or_default(),
+                Err(_) => String::new(),
+            }
+        })
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+
         state
             .db
             .index_book_content(id, &title, author.as_deref(), &subjects, &content)
@@ -1201,9 +1207,12 @@ async fn export_book_notes(
 
 async fn export_all_notes(
     State(state): State<AppState>,
-    Query(query): Query<NotesQuery>,
+    Query(mut query): Query<NotesQuery>,
     Query(export_query): Query<ExportNotesQuery>,
 ) -> AppResult<Response> {
+    if query.limit.is_none() {
+        query.limit = Some(50_000);
+    }
     let notes = state.db.list_all_notes(&query).await?;
     let format = export_query.format.unwrap_or_else(|| "markdown".into());
     if format == "json" {

@@ -1,3 +1,80 @@
+# Checkpoint — 2026-10-28
+
+## Revisão atual — Documentação do Plano de Adoção de Audiolivros e Cursos em Vídeo e Início da Etapa 1
+
+Criação da documentação arquitetural e de adoção em etapas para expansão da biblioteca multimídia com suporte a audiolivros e cursos em vídeo em abas separadas (`docs/PLANO_AUDIOLIVROS_E_VIDEOS.md`), integração no `README.md` e consolidação das melhorias de auditoria e resiliência.
+
+### Mudanças realizadas:
+1. **Documentação Arquitetural e Plano em Etapas (`docs/PLANO_AUDIOLIVROS_E_VIDEOS.md`, `README.md`)**:
+   - Definição do escopo das 4 etapas de implementação (Etapa 1: Fundação, Abas e Streaming Inline; Etapa 2: Player de Audiolivro e MediaSession; Etapa 3: Player de Cursos em Vídeo e Aulas por Módulos; Etapa 4: Thumbnails e Legendas).
+   - Matriz de compatibilidade de formatos de áudio (`mp3`, `m4a`, `m4b`, `ogg`, `opus`, `flac`) e vídeo (`mp4`, `webm`, `mkv`, `m4v`).
+   - Mapeamento das estruturas de persistência para `reading_progress` e `notes` com timecodes.
+   - Referenciado no `README.md`.
+2. **Auditoria de Resiliência e UX**:
+   - Consolidação de timeouts de OCR, offloading Tokio com `spawn_blocking`, restauração de pastas pai na lixeira e melhorias de UX.
+
+### Verificações realmente executadas:
+- `CARGO_TARGET_DIR=target_local cargo clippy --locked --all-targets -- -D warnings`: 0 warnings.
+- `CARGO_TARGET_DIR=target_local cargo test --locked`: 43 passaram, 0 falharam.
+- `npm run test:ui`: aprovado.
+
+### Próximo passo:
+- Fazer git push do plano documentado e implementar a Etapa 1 (extensões de scanner, streaming inline de mídia, filtro `media_type` e abas na interface web).
+
+---
+
+# Checkpoint — 2026-10-27
+
+## Revisão atual — Auditoria de Código, Resiliência Operacional e Melhorias de UX
+
+Auditoria completa da base de código em busca de melhorias de desempenho, segurança e experiência do usuário, cobrindo o backend Rust, persistência SQLite e a interface web.
+
+### Mudanças realizadas:
+
+1. **Robustez de Processos e Timeout de OCR (`src/readers.rs`, `compose.yaml`, `.env.example`)**:
+   - `extract_pdf_ocr_sample`: o parâmetro `timeout_secs` agora é aplicado na invocação de subprocessos (`pdftoppm` e `tesseract`) usando o utilitário de sistema `timeout`. Isso previne que arquivos malformados ou corrompidos travem os processos de OCR indefinidamente.
+   - Adicionada variável `OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-15}` em `compose.yaml` e documentada em `.env.example`.
+
+2. **Offloading de Operações Bloqueantes no Executor Tokio (`src/api.rs`)**:
+   - `reindex_fts_content`: extração textual (`extract_text_sample_with_options`), que envolve parse de PDF, descompressão EPUB/MOBI e OCR, agora roda via `tokio::task::spawn_blocking`, impedindo a degradação de latência do executor assíncrono.
+
+3. **Integridade de Dados e Consultas SQLite (`src/db.rs`, `src/api.rs`)**:
+   - `list_all_notes`: filtro por cor alterado para `json_extract(n.location, '$.color') = ?`, garantindo correspondência exata no AST JSON, imune a variações de espaçamento ou formatação de strings.
+   - `mark_available`: atualização de `updated_at` com o timestamp corrente na restauração de arquivos, sincronizando ordenações recentes e invalidações de cache do cliente.
+   - `export_all_notes`: rota de exportação define limite de até 50.000 anotações para exportar cadernos inteiros sem truncamento prematuro no valor padrão de 100 notas da listagem paginada.
+
+4. **Recuperação de Arquivos da Lixeira (`src/maintenance.rs`, `tests/rust/maintenance.rs`)**:
+   - `restore_trash`: recria com segurança pastas pai intermediárias (`create_dir_all`) caso tenham sido limpas ou excluídas durante o período em que o livro esteve na lixeira.
+   - Teste de regressão adicionado: `trash_restores_when_parent_subfolder_was_removed`.
+
+5. **Ergonomia e Prevenção de Erros na Interface (`web/app.js`)**:
+   - Prevenção de duplicatas: o botão de salvar anotação é desabilitado durante o envio à API.
+   - Proteção de dados: adicionada confirmação (`confirm`) antes de excluir anotações do caderno.
+   - Navegação por teclado no leitor: suporte a setas direcionais (`ArrowLeft` / `ArrowRight`) para avançar e voltar páginas ou capítulos quando o leitor está aberto e sem foco em campos de formulário.
+   - Resiliência no leitor CBZ: navegação por anotações com suporte tanto a `page_index` quanto a `page`.
+
+6. **Docker e Publicação no GHCR (`.github/workflows/publish-image.yml`, `compose.yaml`, `Dockerfile`)**:
+   - Construída e disponibilizada a imagem Docker localmente com a tag `ghcr.io/facrf/estante-livre:latest`.
+   - `compose.yaml`: adicionado bloco `build: { context: ., dockerfile: Dockerfile }`, permitindo que `docker compose up -d` ou `docker compose build` construa a imagem localmente sem falhar caso o pull remoto não encontre a tag no GHCR.
+   - `Dockerfile`: adicionada variável padrão `OCR_TIMEOUT_SECONDS=15`.
+   - `.github/workflows/publish-image.yml`: corrigidas as referências de versões das GitHub Actions (`actions/checkout@v4`, `actions/setup-node@v4`, `actions/upload-artifact@v4`), que usavam versões inexistentes `@v6` e falhavam na inicialização do runner. Ajustadas as plataformas multi-arch para `linux/amd64,linux/arm64`.
+
+### Verificações realmente executadas:
+- `cargo clippy --locked --all-targets -- -D warnings`: 0 warnings.
+- `cargo test --locked`: 43 passaram, 0 falharam, 1 teste de volume ignorado.
+- `npm run test:ui`: aprovado (contrato visual, IDs únicos e gravação de progresso).
+- `npm run test:api`: aprovado (todas as rotas E2E).
+- `npm run test:auth`: aprovado (saúde pública e proteção HTTP Basic).
+- `npm run test:browser`: aprovado (Playwright E2E browser test completo).
+
+### Limitações:
+- O timeout em OCR utiliza o binário `timeout` do coreutils quando disponível no ambiente Linux / container Docker; caso ausente, prossegue sem o invólucro de limite de tempo.
+
+### Próximo passo:
+- Apresentar o relatório de melhorias implementadas e verificadas ao usuário.
+
+---
+
 # Checkpoint — 2026-10-23
 
 ## Revisão atual — Destaques com Marca-texto, Gestão/Exportação de Anotações e Suporte a OCR

@@ -1,7 +1,10 @@
 services:
   estante-livre:
-    # Imagem oficial publicada exclusivamente pelo GitHub Actions no GHCR.
+    # Imagem oficial publicada no GHCR ou construida localmente
     image: ${ESTANTE_IMAGE:-ghcr.io/facrf/estante-livre:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: estante-livre
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"
@@ -16,6 +19,7 @@ services:
       BACKUP_DIR: /data/backups
       COVER_TIMEOUT_SECONDS: ${COVER_TIMEOUT_SECONDS:-60}
       OCR_ENABLED: ${OCR_ENABLED:-true}
+      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-15}
       AUTH_USERNAME: ${AUTH_USERNAME:-}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-}
       GOOGLE_BOOKS_API_KEY: ${GOOGLE_BOOKS_API_KEY:-}

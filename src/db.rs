@@ -149,7 +149,10 @@ impl Database {
 
     pub async fn mark_available(&self, id: i64) -> AppResult<()> {
         self.run(move |conn| {
-            conn.execute("UPDATE books SET is_available=1 WHERE id=?1", [id])?;
+            conn.execute(
+                "UPDATE books SET is_available=1, updated_at=?2 WHERE id=?1",
+                params![id, Utc::now().to_rfc3339()],
+            )?;
             Ok(())
         })
         .await
@@ -1091,7 +1094,7 @@ impl Database {
         let q = query.q.clone();
         let book_id = query.book_id;
         let color = query.color.clone();
-        let limit = query.limit.unwrap_or(100).clamp(1, 500) as i64;
+        let limit = query.limit.unwrap_or(100).clamp(1, 50_000) as i64;
         let offset = query.offset.unwrap_or(0) as i64;
 
         self.run(move |conn| {
@@ -1119,9 +1122,8 @@ impl Database {
             if let Some(ref c) = color {
                 let trimmed = c.trim();
                 if !trimmed.is_empty() {
-                    sql.push_str(" AND n.location LIKE ?");
-                    let pattern = format!("%\"color\":\"{trimmed}\"%");
-                    params.push(pattern.into());
+                    sql.push_str(" AND json_extract(n.location, '$.color') = ?");
+                    params.push(trimmed.to_string().into());
                 }
             }
             sql.push_str(" ORDER BY n.updated_at DESC LIMIT ? OFFSET ?");

@@ -143,6 +143,11 @@ pub fn restore_trash(root: &Path, token: &str) -> AppResult<TrashItem> {
         return Err(AppError::BadRequest("caminho da lixeira invalido".into()));
     }
     let destination = root.join(&item.relative_path);
+    if let Some(parent) = destination.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)?;
+        }
+    }
     let parent = destination
         .parent()
         .ok_or(AppError::NotFound)?

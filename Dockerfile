@@ -22,6 +22,7 @@ ENV APP_BIND=0.0.0.0:20000 \
     BRANDING_DIR=/data/branding \
     BACKUP_DIR=/data/backups \
     OCR_ENABLED=true \
+    OCR_TIMEOUT_SECONDS=15 \
     RUST_LOG=estante_livre=info,tower_http=info
 EXPOSE 20000
 VOLUME ["/data", "/pdf"]

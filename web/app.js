@@ -602,6 +602,7 @@ function renderNotesList() {
   }).join('');
 
   $$('[data-note-delete]', list).forEach(button => button.onclick = async () => {
+    if (!confirm('Excluir esta anotação definitivamente?')) return;
     await api(`/notes/${button.dataset.noteDelete}`, { method: 'DELETE' });
     loadNotes();
   });
@@ -619,8 +620,8 @@ function jumpToLocation(loc) {
     if (input) changePdfPage(Number(loc.page) - Number(input.value || 1));
   } else if (loc.chapter !== undefined && state.reader.kind === 'epub') {
     renderPagedResource('epub', Number(loc.chapter));
-  } else if (loc.page_index !== undefined && state.reader.kind === 'cbz') {
-    renderPagedResource('comic', Number(loc.page_index));
+  } else if ((loc.page_index !== undefined || loc.page !== undefined) && state.reader.kind === 'cbz') {
+    renderPagedResource('comic', loc.page_index !== undefined ? Number(loc.page_index) : Math.max(0, Number(loc.page) - 1));
   } else if (loc.percent !== undefined) {
     const slider = $('#percent-input');
     if (slider) {
@@ -978,7 +979,28 @@ document.addEventListener('DOMContentLoaded', async () => {
   setInterval(retryPendingProgress, 15000);
   pollScanStatus();
   $('#search').addEventListener('input', event => { clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadBooks(event.target.value), 220); });
-  document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) { event.preventDefault(); $('#search').focus(); } if (event.key === 'Escape' && !$('#reader').classList.contains('hidden')) closeReader(); });
+  document.addEventListener('keydown', event => {
+    if (event.key === '/' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) {
+      event.preventDefault();
+      $('#search').focus();
+    }
+    if (event.key === 'Escape' && !$('#reader').classList.contains('hidden')) {
+      closeReader();
+    }
+    if (!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName) && !$('#reader').classList.contains('hidden')) {
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        if (state.reader.kind === 'pdf') changePdfPage(-1);
+        else if (state.reader.kind === 'epub') renderPagedResource('epub', Number(state.reader.location.chapter || 0) - 1);
+        else if (state.reader.kind === 'cbz') renderPagedResource('comic', Number(state.reader.location.page_index || 0) - 1);
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        if (state.reader.kind === 'pdf') changePdfPage(1);
+        else if (state.reader.kind === 'epub') renderPagedResource('epub', Number(state.reader.location.chapter || 0) + 1);
+        else if (state.reader.kind === 'cbz') renderPagedResource('comic', Number(state.reader.location.page_index || 0) + 1);
+      }
+    }
+  });
   $('#book-grid').addEventListener('click', event => { const card = event.target.closest('[data-book-id]'); if (card) openBook(Number(card.dataset.bookId)); });
   $('#book-grid').addEventListener('keydown', event => { if (['Enter',' '].includes(event.key)) { const card = event.target.closest('[data-book-id]'); if (card) openBook(Number(card.dataset.bookId)); } });
   $('#reading-desk-list').addEventListener('click', event => { const remove = event.target.closest('[data-desk-remove]'); if (remove) { event.stopPropagation(); removeFromDesk(Number(remove.dataset.deskRemove)); return; } const card = event.target.closest('[data-book-id]'); if (card) openBook(Number(card.dataset.bookId)); });
@@ -1023,6 +1045,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#note-form').onsubmit = async event => {
     event.preventDefault();
     const form = event.currentTarget;
+    const submitBtn = $('button[type="submit"]', form);
+    if (submitBtn) submitBtn.disabled = true;
     const data = new FormData(form);
     const content = data.get('content');
     const quote = (data.get('quote') || '').trim();
@@ -1040,6 +1064,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       await loadNotes();
       toast('Anotação salva nesta posição.');
     } catch (error) { toast(error.message, true); }
+    finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
   };
   window.addEventListener('pagehide', flushProgressOnPageExit);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushProgressOnPageExit(); else retryPendingProgress(); });
