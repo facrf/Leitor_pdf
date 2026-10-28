@@ -1,6 +1,47 @@
 # Checkpoint — 2026-10-28
 
-## Revisão atual — Plano de Adoção e Conclusão da Etapa 1 (Audiolivros e Vídeos em Abas Separadas)
+## Revisão atual — Conclusão da Etapa 2 (Metadados de Áudio, Capas Embutidas, Temporizador de Sono e MediaSession)
+
+Implementação e verificação completa da **Etapa 2**: parser zero-dependency de metadados ID3v2, ID3v1 e MP4/M4B atoms com extração de capas embutidas (`APIC` e `covr`), integração automática na geração de capas e varredura de audiolivros, player aprimorado com Temporizador de Sono (Sleep Timer) com contagem regressiva, integração profunda com `navigator.mediaSession` (metadados, capa, controles da tela de bloqueio e atalhos de seek) e atalhos de teclado dedicados no reprodutor.
+
+### Mudanças realizadas:
+
+1. **Backend: Parsers de Metadados e Capas Embutidas (`src/audio_metadata.rs`, `tests/rust/audio-metadata.rs`)**:
+   - Implementado parser bounded seguro para tags ID3v2.3 / ID3v2.4 (`TIT2` título, `TPE1` autor/artista, frame `APIC` para capa embutida JPEG/PNG).
+   - Implementado fallback ID3v1 nos últimos 128 bytes do arquivo (`TAG`).
+   - Implementado parser para átomos MP4/M4B (`moov.udta.meta.ilst` para `©nam`, `©ART` e `covr`).
+   - Bounded I/O: limites rigorosos de leitura (cabeçalhos de até 10 MB para átomos e ID3v2; buffer de capa de até 10 MB), garantindo zero estouro de memória e tratamento resiliente de arquivos truncados.
+   - Teste de regressão completo: `tests/rust/audio-metadata.rs` cobrindo ID3v2, ID3v1 e átomos M4B com imagem JPEG sintética.
+
+2. **Backend: Integração no Scanner e Gerador de Capas (`src/scanner.rs`, `src/covers.rs`, `src/db.rs`)**:
+   - `src/scanner.rs`: na varredura de `mp3`, `m4a` e `m4b`, extrai título e autor reais embutidos nas tags caso disponíveis, caindo graciosamente para o nome do arquivo se ausentes.
+   - `src/covers.rs`: na rota/tarefa de geração de capa (`generate_one`), arquivos `mp3`, `m4a` e `m4b` têm suas capas embutidas extraídas e salvas na pasta de capas como JPEG/PNG, dispensando binários externos para capas de audiolivros.
+   - `src/db.rs`: `missing_pdf_covers` agora inclui extensões `mp3`, `m4a` e `m4b` como elegíveis para geração de capa.
+
+3. **Interface Web: Temporizador de Sono, MediaSession e Atalhos (`web/app.js`, `web/styles.css`)**:
+   - `web/app.js`:
+     - Temporizador de Sono (Sleep Timer) com opções desligado, 15m, 30m, 45m e 60m. Atualização a cada segundo com contagem regressiva visual (`#audio-sleep-countdown`) e pausa suave do áudio ao zerar.
+     - Suporte à API `navigator.mediaSession`: publica `MediaMetadata` (título, autor, capa absoluta) e registra handlers para `play`, `pause`, `seekbackward` (15s), `seekforward` (30s), `seekto` e `stop`.
+     - Sincronização de estado `setPositionState` com duração e tempo corrente.
+     - Atalhos de teclado no estágio de mídia: Barra de Espaço (play/pause), Seta Esquerda (retroceder) e Seta Direita (avançar).
+     - Limpeza completa de timers e handlers do MediaSession ao fechar o leitor.
+   - `web/styles.css`: Estilização do badge de contagem regressiva do sleep timer (`.sleep-countdown`).
+
+### Verificações realmente executadas:
+- `CARGO_TARGET_DIR=target_local cargo clippy --locked --all-targets -- -D warnings`: 0 warnings.
+- `CARGO_TARGET_DIR=target_local cargo test --locked`: 47 passaram, 0 falharam, 1 teste de volume ignorado.
+- `npm run test:ui`: aprovado (contrato visual, IDs únicos e gravação de progresso).
+- `npm run test:api`: aprovado (todas as rotas E2E).
+- `npm run test:auth`: aprovado (saúde pública e proteção HTTP Basic).
+
+### Próximo passo:
+- Implementar a **Etapa 3**: Player de Cursos em Vídeo, navegação por aulas/módulos baseada na pasta do curso e acompanhamento de aulas concluídas.
+
+---
+
+# Checkpoint — 2026-10-28
+
+## Revisão anterior — Plano de Adoção e Conclusão da Etapa 1 (Audiolivros e Vídeos em Abas Separadas)
 
 Elaboração do plano em etapas (`docs/PLANO_AUDIOLIVROS_E_VIDEOS.md`), commit & push para o repositório remoto, e implementação completa da **Etapa 1**: fundação de mídias, extensão do scanner, streaming inline com Range Requests, filtro de categoria `media_type`, contadores de mídia nas facetas, navegação por abas na interface e reprodutores dedicados para áudio e vídeo com sincronização de progresso.
 

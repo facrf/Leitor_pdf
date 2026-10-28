@@ -949,7 +949,7 @@ impl Database {
         self.run(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, relative_path FROM books
-                 WHERE is_available=1 AND format='pdf' AND cover_filename IS NULL
+                 WHERE is_available=1 AND format IN ('pdf', 'mp3', 'm4a', 'm4b') AND cover_filename IS NULL
                  ORDER BY id LIMIT ?1",
             )?;
             let rows = stmt.query_map([limit.clamp(1, 10_000) as i64], |row| {

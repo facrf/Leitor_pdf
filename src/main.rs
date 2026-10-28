@@ -1,4 +1,5 @@
 mod api;
+mod audio_metadata;
 mod auth;
 mod backup;
 mod bounded_io;

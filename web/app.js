@@ -7,6 +7,7 @@ const state = {
   searchTimer: null, scanTimer: null, scanObservedRunning: false,
   carouselIndex: 0, carouselTimer: null,
   progressSaveTimer: null, progressSaveChain: Promise.resolve(),
+  sleepTimer: null, sleepTimerEndsAt: 0,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -431,6 +432,16 @@ function renderAudioPlayer() {
         <option value="2">2x</option>
       </select>
     </label>
+    <label>Sono:
+      <select id="audio-sleep-timer">
+        <option value="0">Desativado</option>
+        <option value="15">15 min</option>
+        <option value="30">30 min</option>
+        <option value="45">45 min</option>
+        <option value="60">60 min</option>
+      </select>
+    </label>
+    <span id="audio-sleep-countdown" class="sleep-countdown hidden" aria-live="polite"></span>
     <button class="icon-button light" id="audio-step-fwd" type="button" title="Avançar 30s">↻ 30s</button>
   `;
   const audio = $('#media-audio-element');
@@ -443,6 +454,8 @@ function renderAudioPlayer() {
     }
     audio.ontimeupdate = () => updateMediaProgress(audio, 'audio');
     audio.onpause = () => scheduleProgressSave(true);
+    setupSleepTimer(audio);
+    setupMediaSession(audio, book, 'audio');
   }
   $('#audio-speed-select')?.addEventListener('change', e => {
     if (audio) audio.playbackRate = Number(e.target.value);
@@ -488,6 +501,7 @@ function renderVideoPlayer() {
     }
     video.ontimeupdate = () => updateMediaProgress(video, 'video');
     video.onpause = () => scheduleProgressSave(true);
+    setupMediaSession(video, book, 'video');
   }
   $('#video-speed-select')?.addEventListener('change', e => {
     if (video) video.playbackRate = Number(e.target.value);
@@ -501,6 +515,90 @@ function renderVideoPlayer() {
   updateReaderLabel();
 }
 
+function setupMediaSession(media, book, type) {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    const artwork = book.has_cover ? [
+      { src: `/api/books/${book.id}/cover`, sizes: '512x512', type: 'image/jpeg' },
+      { src: `/api/books/${book.id}/cover`, sizes: '256x256', type: 'image/jpeg' },
+    ] : [];
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: book.title,
+      artist: book.author || 'Estante Livre',
+      album: type === 'audio' ? 'Audiolivro' : 'Curso em Vídeo',
+      artwork,
+    });
+    navigator.mediaSession.setActionHandler('play', () => { media.play(); });
+    navigator.mediaSession.setActionHandler('pause', () => { media.pause(); });
+    navigator.mediaSession.setActionHandler('seekbackward', details => {
+      const skip = details.seekOffset || (type === 'audio' ? 15 : 10);
+      media.currentTime = Math.max(0, media.currentTime - skip);
+    });
+    navigator.mediaSession.setActionHandler('seekforward', details => {
+      const skip = details.seekOffset || (type === 'audio' ? 30 : 10);
+      media.currentTime = Math.min(media.duration || Infinity, media.currentTime + skip);
+    });
+    if ('seekto' in navigator.mediaSession) {
+      navigator.mediaSession.setActionHandler('seekto', details => {
+        if (details.seekTime != null) media.currentTime = details.seekTime;
+      });
+    }
+  } catch (_) { /* navegadores sem suporte completo a MediaSession */ }
+}
+
+function syncMediaSessionPosition(media) {
+  if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState) return;
+  if (!media.duration || isNaN(media.duration)) return;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: media.duration,
+      playbackRate: media.playbackRate || 1,
+      position: Math.min(media.currentTime || 0, media.duration),
+    });
+  } catch (_) {}
+}
+
+function setupSleepTimer(audio) {
+  const select = $('#audio-sleep-timer');
+  const label = $('#audio-sleep-countdown');
+  if (!select || !label) return;
+  select.onchange = () => {
+    clearInterval(state.sleepTimer);
+    state.sleepTimer = null;
+    const minutes = Number(select.value);
+    if (minutes <= 0) {
+      label.classList.add('hidden');
+      return;
+    }
+    state.sleepTimerEndsAt = Date.now() + minutes * 60 * 1000;
+    label.classList.remove('hidden');
+    updateSleepLabel(minutes * 60);
+    state.sleepTimer = setInterval(() => {
+      const remaining = Math.max(0, Math.round((state.sleepTimerEndsAt - Date.now()) / 1000));
+      if (remaining <= 0) {
+        clearInterval(state.sleepTimer);
+        state.sleepTimer = null;
+        label.classList.add('hidden');
+        select.value = '0';
+        if (audio && !audio.paused) {
+          audio.pause();
+          toast('Temporizador de sono: áudio pausado.');
+        }
+      } else {
+        updateSleepLabel(remaining);
+      }
+    }, 1000);
+  };
+}
+
+function updateSleepLabel(seconds) {
+  const label = $('#audio-sleep-countdown');
+  if (!label) return;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  label.textContent = `⏳ ${m}:${s < 10 ? '0' : ''}${s}`;
+}
+
 function updateMediaProgress(media, type) {
   if (!media) return;
   const time = media.currentTime || 0;
@@ -509,6 +607,7 @@ function updateMediaProgress(media, type) {
   state.reader.percent = percent;
   state.reader.location = { type, time, duration };
   updateReaderLabel();
+  syncMediaSessionPosition(media);
   scheduleProgressSave();
 }
 
@@ -790,8 +889,18 @@ function locationLabel(location = {}) {
 
 async function closeReader() {
   clearTimeout(state.progressSaveTimer);
+  clearInterval(state.sleepTimer);
+  state.sleepTimer = null;
   const media = $('#media-audio-element') || $('#media-video-element');
   if (media) media.pause();
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.metadata = null;
+      ['play', 'pause', 'seekbackward', 'seekforward', 'seekto'].forEach(action => {
+        navigator.mediaSession.setActionHandler(action, null);
+      });
+    } catch (_) {}
+  }
   await persistProgress();
   $('#reader').classList.add('hidden'); $('#notes-panel').classList.remove('open'); document.body.style.overflow = '';
   await Promise.all([loadBooks($('#search').value), loadReadingDesk(), loadSuggestions()]);
@@ -1139,14 +1248,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       closeReader();
     }
     if (!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName) && !$('#reader').classList.contains('hidden')) {
-      if (event.key === 'ArrowLeft') {
+      const audio = $('#media-audio-element');
+      const video = $('#media-video-element');
+      if (event.key === ' ' || event.code === 'Space') {
+        if (audio || video) {
+          event.preventDefault();
+          const media = audio || video;
+          if (media.paused) media.play();
+          else media.pause();
+        }
+      } else if (event.key === 'ArrowLeft') {
         event.preventDefault();
-        if (state.reader.kind === 'pdf') changePdfPage(-1);
+        if (audio) audio.currentTime = Math.max(0, audio.currentTime - 15);
+        else if (video) video.currentTime = Math.max(0, video.currentTime - 10);
+        else if (state.reader.kind === 'pdf') changePdfPage(-1);
         else if (state.reader.kind === 'epub') renderPagedResource('epub', Number(state.reader.location.chapter || 0) - 1);
         else if (state.reader.kind === 'cbz') renderPagedResource('comic', Number(state.reader.location.page_index || 0) - 1);
       } else if (event.key === 'ArrowRight') {
         event.preventDefault();
-        if (state.reader.kind === 'pdf') changePdfPage(1);
+        if (audio) audio.currentTime = Math.min(audio.duration || Infinity, audio.currentTime + 30);
+        else if (video) video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 10);
+        else if (state.reader.kind === 'pdf') changePdfPage(1);
         else if (state.reader.kind === 'epub') renderPagedResource('epub', Number(state.reader.location.chapter || 0) + 1);
         else if (state.reader.kind === 'cbz') renderPagedResource('comic', Number(state.reader.location.page_index || 0) + 1);
       }

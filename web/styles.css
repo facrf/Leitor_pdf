@@ -173,6 +173,7 @@ button { color: inherit; }
 .reader-stage iframe { background: white; border: 0; height: 100%; width: 100%; }
 .reader-stage .comic-page { display: block; margin: 0 auto; max-width: min(100%, 1400px); min-height: 200px; }
 .reader-navigation select { background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.2); border-radius: 7px; color: white; padding: 6px 9px; }
+.sleep-countdown { background: rgba(215,93,54,.25); border: 1px solid rgba(215,93,54,.5); border-radius: 6px; color: #ff9d7d; font-size: 11px; font-weight: 700; padding: 4px 8px; white-space: nowrap; }
 .media-player-container { align-items: center; display: flex; flex-direction: column; justify-content: center; margin: auto; max-width: 840px; padding: 30px 20px; width: 100%; }
 .audio-player-view { background: rgba(0,0,0,.28); border: 1px solid rgba(255,255,255,.1); border-radius: 16px; margin-top: 4vh; padding: 40px 24px; }
 .audio-player-view .media-cover-wrapper { margin: 0 auto 20px; max-width: 200px; width: 100%; }

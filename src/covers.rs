@@ -20,6 +20,29 @@ pub async fn generate_one(
     relative_path: &str,
 ) -> AppResult<()> {
     let source = scanner::resolve_book_path(library_root, relative_path)?;
+    let extension = source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+
+    if matches!(extension.as_str(), "mp3" | "m4a" | "m4b") {
+        if let Some((image_data, ext)) = crate::audio_metadata::extract_embedded_cover(&source) {
+            tokio::fs::create_dir_all(&config.covers_dir).await?;
+            let base_name = format!(
+                "auto-{book_id}-{}-{}",
+                Utc::now().timestamp_millis(),
+                rand::random::<u64>(),
+            );
+            let filename = format!("{base_name}.{ext}");
+            let output_file = config.covers_dir.join(&filename);
+            tokio::fs::write(&output_file, &image_data).await?;
+            db.set_cover(book_id, &filename).await?;
+            return Ok(());
+        }
+        return Err(AppError::BadRequest("audiolivro sem capa embutida".into()));
+    }
+
     tokio::fs::create_dir_all(&config.covers_dir).await?;
     let base_name = format!(
         "auto-{book_id}-{}-{}",

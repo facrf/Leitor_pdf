@@ -309,7 +309,7 @@ fn scan_file(
         .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
         .unwrap_or_default();
     let size = metadata.len() as i64;
-    let needs_metadata = extract_metadata && matches!(extension, "pdf" | "epub");
+    let needs_metadata = extract_metadata && matches!(extension, "pdf" | "epub" | "mp3" | "m4a" | "m4b");
     if let Some(known) = known_books.get(&relative_path) {
         if known.size == size
             && known.modified_at == modified_at
@@ -339,6 +339,7 @@ fn scan_file(
         match extension {
             "pdf" => pdf_metadata(path, &fallback_title),
             "epub" => epub_metadata(path, &fallback_title),
+            "mp3" | "m4a" | "m4b" => crate::audio_metadata::parse_audio_metadata(path, &fallback_title),
             _ => (fallback_title.clone(), None, None),
         }
     } else {
